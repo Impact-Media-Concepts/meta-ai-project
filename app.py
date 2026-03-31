@@ -504,13 +504,14 @@ def generate_concepts(
 ) -> List[Dict]:
     """
     Returns a list of concept dicts with keys:
-    nummer, titel, prioriteit, verwachte_impact,
+    nummer, titel, prioriteit, rationale,
     hook, primary_text, headline, visuele_omschrijving,
-    referentie_afbeelding, master_prompt, design_strategy
+    referentie_afbeelding, master_prompt
     """
     image_filenames = image_filenames or []
     filenames_block = (
-        "Beschikbare referentie-afbeeldingen (exacte bestandsnamen):\n"
+        "Beschikbare referentie-afbeeldingen (exacte bestandsnamen — alleen gebruiken voor het veld "
+        "referentie_afbeelding, NIET als tekst in de master_prompt):\n"
         + "\n".join(f"  - {fn}" for fn in image_filenames)
         if image_filenames
         else "Geen afbeeldingen geüpload."
@@ -546,7 +547,9 @@ def generate_concepts(
         "- nummer (int): 1–10\n"
         "- titel (string): interne naam voor het concept\n"
         "- prioriteit (string): 'Hoog', 'Middel' of 'Laag'\n"
-        "- verwachte_impact (string): één zin — waarom dit concept scoort op basis van de winnende patronen\n"
+        "- rationale (string): precies 2 zinnen in het Nederlands die uitleggen waarom dit concept zal converteren — "
+        "gebaseerd op de winnende patronen in de analyse. Eerste zin = het gedragsinzicht (waarom de doelgroep reageert). "
+        "Tweede zin = de verwachte zakelijke impact (CTR, ROAS, of betrokkenheid).\n"
         "- hook (string): thumb-stopper, max. 10 woorden\n"
         "- primary_text (string): 2–4 zinnen, menselijk en on-brand, inclusief het aanbod\n"
         "- headline (string): klik-trigger, max. 8 woorden\n"
@@ -554,29 +557,27 @@ def generate_concepts(
         "hero-afbeelding, model (uitdrukking, houding, demografisch profiel), productplaatsing, "
         "kleurenpalet, typografiestijl, sfeer, grafische elementen, beeldverhouding\n"
         "- referentie_afbeelding (string): kies de EXACTE bestandsnaam (uit de lijst hierboven) die het beste "
-        "past als product-referentie voor dit concept. "
+        "past als visuele referentie voor dit concept. "
         "Als het concept product-gericht is, kies de meest passende afbeelding. "
         "Als het concept service- of sfeer-gericht is zonder duidelijk product, gebruik de waarde 'geen'.\n"
-        "- master_prompt (string): een gedetailleerde, gebruiksklare prompt voor Freepik of Nano Banana Pro. "
-        "De prompt is in het Engels en dekt verplicht: "
-        "(1) Lighting — omschrijf het type licht (natural window light, soft studio diffused, golden hour, etc.), "
-        "(2) Camera angle — benoem het type opname (close-up, hero shot, lifestyle wide, flat lay, over-the-shoulder), "
-        "(3) Composition — geef de beeldopbouw aan (rule of thirds, centered product, negative space, layered depth), "
-        "(4) Online Klik aesthetic — clean, professional, conversion-focused, minimalist luxury. "
-        "VERPLICHT: als referentie_afbeelding een bestandsnaam is (niet 'geen'), bevat de prompt: "
-        "(a) de tag '[Product vanuit {BESTANDSNAAM}]' vroeg in de prompt, waarbij {BESTANDSNAAM} de exacte waarde "
-        "van referentie_afbeelding is — dit vertelt de AI-generator welk object te isoleren; "
-        "(b) de zin 'Integrated with the product and style from {BESTANDSNAAM}'. "
-        "Als de afbeelding meerdere producten kan bevatten, voeg dan toe: "
-        "'Focus op: [het meest prominente product] uit de afbeelding' — beschrijf het product specifiek "
-        "(kleur, materiaal, vorm) zodat er geen ambiguïteit is. "
-        "Als referentie_afbeelding 'geen' is, schrijf: "
-        "'No specific product reference needed — focus on the vibe and human interaction described in the briefing.' "
-        "Als het concept product-gericht is: benadruk productdetails, textuur en materiaal. "
-        "Als het concept service- of sfeer-gericht is: focus op menselijke interactie en emotie. "
-        "Sluit af met: aspect ratio 1:1, no text overlays, no watermarks.\n"
-        "- design_strategy (string): 1-2 zinnen in het Nederlands die uitleggen waarom juist deze visuele richting "
-        "gekozen is op basis van de top-presterende advertenties in de analyse.\n\n"
+        "- master_prompt (string): een rijke, beschrijvende XML-prompt (minimaal 60 woorden) voor "
+        "Freepik of Nano Banana Pro. STRIKTE REGELS:\n"
+        "  (1) NOOIT bestandsnamen gebruiken in de prompt-tekst — beschrijf het product VISUEEL "
+        "      (bv. 'a delicate gold ring with a single diamond', 'a structured leather handbag in cognac'). "
+        "      Als meerdere producten zichtbaar kunnen zijn, specificeer: 'Focus on: [product description] — "
+        "      [kleur, materiaal, vorm]'.\n"
+        "  (2) Formatteer de output ALTIJD als dit exacte XML-blok (geen extra tekst eromheen):\n"
+        "      <prompt>\n"
+        "      [Scene: beschrijf de visuele scène in detail — locatie, sfeer, props, achtergrond]\n"
+        "      [Style: lighting type, camera angle, composition, Online Klik aesthetic — clean, professional, "
+        "      conversion-focused, minimalist luxury, 8K commercial photography]\n"
+        "      [Integration: Seamlessly integrate the product from the provided reference image into this scene.]\n"
+        "      </prompt>\n"
+        "  (3) De [Scene] sectie beschrijft de gewenste advertentiebeeldopbouw — NIET het product zelf.\n"
+        "  (4) De [Style] sectie dekt verplicht: lighting (bv. soft diffused studio light), "
+        "      camera angle (bv. close-up hero shot), composition (bv. rule of thirds, negative space).\n"
+        "  (5) De [Integration] regel is altijd letterlijk: "
+        "      'Seamlessly integrate the product from the provided reference image into this scene.'\n\n"
         "Extra regels:\n"
         "- Bouw voort op de winnende patronen: dubbel aanbod, elegante close-ups, aspirationeel model.\n"
         "- Varieer de haakjes: nieuwsgierigheid, social proof, urgentie, storytelling, voordeel.\n"
@@ -812,24 +813,24 @@ def generate_pdf(
                 ref_display = "Geen product-referentie" if ref_afb.lower() == "geen" else ref_afb
                 pdf.multi_cell(val_w, 5, safe_pdf_text(ref_display))
 
-            # Design Strategy
-            design_strategy = c.get("design_strategy", "")
-            if design_strategy:
+            # Rationale
+            rationale = c.get("rationale", c.get("design_strategy", ""))
+            if rationale:
                 pdf.set_x(_PDF_MARGIN)
                 pdf.set_font("Helvetica", "B", 9)
                 pdf.set_text_color(0, 87, 60)
-                pdf.cell(_PDF_LABEL_W, 5, "Design Strategy:", ln=False)
+                pdf.cell(_PDF_LABEL_W, 5, "Rationale:", ln=False)
                 pdf.set_font("Helvetica", "I", 9)
                 pdf.set_text_color(20, 20, 20)
-                pdf.multi_cell(val_w, 5, safe_pdf_text(design_strategy))
+                pdf.multi_cell(val_w, 5, safe_pdf_text(rationale))
 
-            # Master Prompt
+            # Master Prompt (XML)
             master_prompt = c.get("master_prompt", "")
             if master_prompt:
                 pdf.set_x(_PDF_MARGIN)
                 pdf.set_font("Helvetica", "B", 9)
                 pdf.set_text_color(0, 87, 60)
-                pdf.cell(pdf.epw, 5, "Master Prompt (Freepik / Nano Banana Pro):", ln=True)
+                pdf.cell(pdf.epw, 5, "Master Prompt — Nano Banana Pro / Freepik (XML):", ln=True)
                 pdf.set_x(_PDF_MARGIN)
                 pdf.set_fill_color(245, 250, 247)
                 pdf.set_font("Courier", "", 8)
@@ -1040,7 +1041,7 @@ if start_btn:
                 "",
                 f"**Referentie-afbeelding:** {c.get('referentie_afbeelding', '—')}",
                 "",
-                f"**Design Strategy:** {c.get('design_strategy', '—')}",
+                f"**Rationale:** {c.get('rationale', '—')}",
                 "",
                 "**Master Prompt (Freepik / Nano Banana Pro):**",
                 "",
@@ -1300,16 +1301,20 @@ if "results" in st.session_state:
 
     # ---- Tab 3: Creatieve briefings -----------------------------------------
     with tab3:
-        st.subheader("10 Creatieve Briefings")
-        st.caption(
-            "Gegenereerd op basis van de winnende creatieve patronen. "
-            "Elke briefing is direct bruikbaar voor een ontwerper of copywriter."
+        st.subheader("🚀 Strategische Nieuwe Concepten")
+        st.markdown(
+            "**Hoe gebruik je deze briefings?**  "
+            "Elke kaart toont links de referentie-afbeelding die de AI heeft geselecteerd. "
+            "Kopieer de **Master Prompt** (het XML-blok), ga naar "
+            "**Nano Banana Pro** of **Freepik**, upload de referentie-afbeelding, "
+            "plak de prompt en genereer je nieuwe banner. "
+            "De prompt beschrijft het product visueel zodat de generator weet welk object te integreren."
         )
 
         if not concepts:
             st.warning("Geen concepten beschikbaar. Controleer je API-sleutel en probeer opnieuw.")
         else:
-            # Summary row: count per priority
+            # Priority summary metrics
             prio_counts = {}
             for c in concepts:
                 p = c.get("prioriteit", "Onbekend")
@@ -1317,59 +1322,59 @@ if "results" in st.session_state:
 
             p1, p2, p3 = st.columns(3)
             p1.metric("🔴 Hoge Prioriteit", prio_counts.get("Hoog", 0))
-            p2.metric("🟠 Middel Prioriteit", prio_counts.get("Middel", 0))
-            p3.metric("⚪ Lage Prioriteit", prio_counts.get("Laag", 0))
+            p2.metric("🔵 Middel Prioriteit", prio_counts.get("Middel", 0))
+            p3.metric("⚪ Lage Prioriteit",  prio_counts.get("Laag", 0))
 
             st.divider()
 
             for concept in concepts:
-                nummer         = concept.get("nummer", "?")
-                titel          = concept.get("titel", "Zonder titel")
-                prioriteit     = concept.get("prioriteit", "—")
-                impact         = concept.get("verwachte_impact", "—")
-                hook           = concept.get("hook", "—")
-                body           = concept.get("primary_text", "—")
-                headline       = concept.get("headline", "—")
-                visual         = concept.get("visuele_omschrijving", "—")
-                master_prompt  = concept.get("master_prompt", "")
-                design_strategy = concept.get("design_strategy", "")
-                ref_img        = concept.get("referentie_afbeelding", "")
-                ref_is_file    = bool(ref_img and ref_img.lower() != "geen")
+                nummer        = concept.get("nummer", "?")
+                titel         = concept.get("titel", "Zonder titel")
+                prioriteit    = concept.get("prioriteit", "—")
+                rationale     = concept.get("rationale", concept.get("verwachte_impact", "—"))
+                hook          = concept.get("hook", "—")
+                body          = concept.get("primary_text", "—")
+                headline      = concept.get("headline", "—")
+                visual        = concept.get("visuele_omschrijving", "—")
+                master_prompt = concept.get("master_prompt", "")
+                ref_img       = concept.get("referentie_afbeelding", "")
+                ref_is_file   = bool(ref_img and ref_img.lower() != "geen")
 
-                prio_cfg       = PRIORITY_COLOURS.get(prioriteit, ("#6c757d", "#fff", prioriteit))
+                prio_cfg              = PRIORITY_COLOURS.get(prioriteit, ("#6c757d", "#fff", prioriteit))
                 bg_col, txt_col, badge_label = prio_cfg
 
                 with st.container(border=True):
-                    # ── Header: concept name + priority badge ──────────────────
-                    head_left, head_right = st.columns([3, 1])
-                    with head_left:
-                        st.markdown(f"#### Concept {nummer}: {titel}")
-                    with head_right:
+                    # ── Card header ────────────────────────────────────────────
+                    h_left, h_right = st.columns([3, 1])
+                    with h_left:
+                        st.markdown(f"### 💡 {titel}")
+                        st.caption(f"Concept {nummer}")
+                    with h_right:
                         st.markdown(
-                            f"<div style='text-align:right;margin-top:6px'>"
+                            f"<div style='text-align:right;padding-top:8px'>"
                             f"<span style='background:{bg_col};color:{txt_col};"
                             f"padding:5px 14px;border-radius:20px;font-size:0.78rem;"
                             f"font-weight:700;letter-spacing:0.05em;display:inline-block'>"
                             f"● {prioriteit.upper()}</span><br>"
-                            f"<span style='font-size:0.72rem;color:{bg_col};font-weight:600;"
-                            f"letter-spacing:0.04em'>{badge_label}</span>"
-                            f"</div>",
+                            f"<span style='font-size:0.72rem;color:{bg_col};"
+                            f"font-weight:600;margin-top:2px;display:inline-block'>"
+                            f"{badge_label}</span></div>",
                             unsafe_allow_html=True,
                         )
 
-                    # ── Strategic ratio banner ─────────────────────────────────
+                    # ── Rationale ──────────────────────────────────────────────
                     st.markdown(
-                        f"<div style='background:#edfaf3;border-left:4px solid #33B784;"
-                        f"padding:8px 14px;border-radius:4px;margin:4px 0 14px 0;"
-                        f"font-size:0.9rem'>💡 <strong>Strategische Ratio:</strong> {impact}</div>",
+                        f"<div style='background:#f5faf7;border-left:4px solid #00573C;"
+                        f"padding:10px 14px;border-radius:4px;margin:8px 0 14px 0;"
+                        f"font-size:0.9rem;color:#1a3a2a'>"
+                        f"<strong>Rationale:</strong> {rationale}</div>",
                         unsafe_allow_html=True,
                     )
 
-                    # ── Main 2-column layout: LEFT thumbnail | RIGHT content ───
-                    col_left, col_right = st.columns([1, 2])
+                    # ── Main 2-column layout ───────────────────────────────────
+                    col_left, col_right = st.columns([1, 1.5])
 
                     with col_left:
-                        # Thumbnail of the reference image
                         if ref_is_file:
                             thumb_bytes = image_bytes_map.get(ref_img)
                             if thumb_bytes:
@@ -1377,47 +1382,35 @@ if "results" in st.session_state:
                             st.markdown(
                                 f"<div style='background:#fff3cd;border:1px solid #ffc107;"
                                 f"border-radius:6px;padding:6px 10px;margin-top:6px;"
-                                f"font-size:0.78rem;word-break:break-all'>"
+                                f"font-size:0.76rem;word-break:break-all'>"
                                 f"🖼️ <strong>Referentie:</strong><br><code>{ref_img}</code></div>",
                                 unsafe_allow_html=True,
                             )
                         else:
                             st.markdown(
-                                "<div style='background:#f8f9fa;border:1px solid #dee2e6;"
-                                "border-radius:8px;padding:14px;font-size:0.82rem;"
-                                "color:#6c757d;text-align:center;min-height:120px;"
-                                "display:flex;align-items:center;justify-content:center'>"
-                                "🖼️<br><em>Geen product-referentie — focus op de vibe</em></div>",
+                                "<div style='background:#f8f9fa;border:1px dashed #ced4da;"
+                                "border-radius:8px;padding:24px 14px;font-size:0.82rem;"
+                                "color:#6c757d;text-align:center'>"
+                                "🖼️<br><br><em>Geen product-referentie<br>focus op de vibe</em></div>",
                                 unsafe_allow_html=True,
                             )
 
                     with col_right:
-                        # Concept naam + design strategy
-                        if design_strategy:
-                            st.markdown(
-                                f"<div style='background:#f5faf7;border-left:3px solid #00573C;"
-                                f"padding:8px 12px;border-radius:4px;margin-bottom:10px;"
-                                f"font-size:0.85rem;color:#1a3a2a'>"
-                                f"<strong>Design Strategy:</strong> {design_strategy}</div>",
-                                unsafe_allow_html=True,
-                            )
-
-                        # Master Prompt box
                         st.markdown(
-                            "<div style='font-size:0.78rem;font-weight:700;color:#00573C;"
-                            "letter-spacing:0.05em;text-transform:uppercase;margin-bottom:4px'>"
-                            "🎨 Master Prompt</div>",
+                            "<div style='font-size:0.75rem;font-weight:700;color:#00573C;"
+                            "letter-spacing:0.06em;text-transform:uppercase;margin-bottom:4px'>"
+                            "🎨 Master Prompt — Nano Banana Pro / Freepik</div>",
                             unsafe_allow_html=True,
                         )
                         if master_prompt:
-                            st.code(master_prompt, language=None)
+                            st.code(master_prompt, language="xml")
                         st.caption(
-                            "Copy-paste this into Nano Banana Pro / Freepik — "
-                            "upload the reference image on the left first."
+                            "Copy-paste this XML block into Nano Banana Pro or Freepik. "
+                            "Upload the reference image on the left before generating."
                         )
 
-                    # ── Copy text fields (full width, collapsible) ─────────────
-                    with st.expander("✏️ Advertentieteksten (Hook · Primary Text · Headline)"):
+                    # ── Advertentieteksten (collapsible) ───────────────────────
+                    with st.expander("✏️ Advertentieteksten — Hook · Primary Text · Headline"):
                         st.markdown(
                             f"<div style='background:#fff8e1;border-radius:6px;"
                             f"padding:10px 14px;margin-bottom:8px'>"
@@ -1446,13 +1439,12 @@ if "results" in st.session_state:
                         )
                         clipboard_button(headline, key=f"hl_{nummer}")
 
-                    # ── Art direction (full width, collapsible) ────────────────
+                    # ── Art direction (collapsible) ────────────────────────────
                     with st.expander("🎨 Art Direction Briefing"):
                         st.markdown(visual)
 
                 st.divider()
 
-            st.divider()
             st.download_button(
                 "⬇️ Download alle briefings (Markdown)",
                 data=r.get("concepts_md", "").encode("utf-8"),
