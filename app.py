@@ -478,6 +478,7 @@ def load_csv_from_upload(file) -> pd.DataFrame:
             encoding=enc,
             encoding_errors="replace",
             on_bad_lines="skip",
+            skipinitialspace=True,   # strip spaces after delimiter (e.g. ", Value")
         )
         if sep is None:
             kwargs.update(sep=None, engine="python")
@@ -495,6 +496,18 @@ def load_csv_from_upload(file) -> pd.DataFrame:
                 f"Only {len(df.columns)} column(s) parsed with sep={sep!r}/{enc} "
                 "— likely wrong separator."
             )
+
+        # Immediately clean the ad-name column so downstream code always gets
+        # a plain, non-null string (never NaN, never '  BANNER_3  ').
+        for _ad_col_name in AD_NAME_COLUMNS:
+            if _ad_col_name in df.columns:
+                df[_ad_col_name] = (
+                    df[_ad_col_name]
+                    .fillna("Naamloze Ad")
+                    .astype(str)
+                    .str.strip()
+                )
+                break   # only clean the first matching column
 
         # Pre-clean numeric columns that are still raw strings.
         for _col in _NUMERIC_COLS:
@@ -1440,148 +1453,115 @@ elif st.session_state.phase == "MATCHER":
             )
             st.stop()
 
-        # ── Build display rows: every CSV row gets a unique slot ────────────────
-        # Key insight: use the DataFrame row-index (not ad-name) as the unique ID.
-        # This prevents any deduplication/merging, so each row appears exactly once.
-        _m_roas_col = find_column(_m_df, ROAS_COLUMNS_KPI)
-        _priority   = {"High Performer": 0, "Average": 1, "Underperformer": 2, "No Data": 3}
+        # ── Build row list — one entry per CSV row, NEVER grouped or deduplicated ──
+        # The DataFrame row-index (integer) is the single source of truth.
+        # We do NOT sort, do NOT deduplicate by ad name. If 9 rows are in the
+        # CSV, exactly 9 rows are shown in the matcher — in CSV order.
+        _img_names     = [img["name"] for img in imgs_data]
+        _img_bytes_map = {img["name"]: img["data"] for img in imgs_data}
+        _selectbox_opts = ["(geen afbeelding)"] + _img_names
 
-        _top_ads: List[tuple] = []  # (csv_row_idx: int, ad_name: str, category: str, roas: float)
+        # Build the display list: (row_idx, ad_name, category)
+        # row_idx is the immutable DataFrame index — it is the key for everything.
+        _rows: List[Tuple[int, str, str]] = []
         for _row_idx, _row in _m_df.iterrows():
-            _adn = str(_row[_m_ad_col]).strip()
+            _adn = str(_row[_m_ad_col])   # already stripped + fillna'd in load_csv
             _cat = str(_row.get("performance_category", "No Data"))
+            _rows.append((int(_row_idx), _adn, _cat))
 
-            # Safe ROAS extraction — guards against 'actions:off', '€ ...', '-', NaN
-            _roas = 0.0
-            if _m_roas_col:
-                try:
-                    _rv = _row[_m_roas_col]
-                    if pd.notna(_rv):
-                        _roas = float(clean_dutch_number(_rv))
-                        if _roas != _roas:   # isnan check after clean_dutch_number
-                            _roas = 0.0
-                except (ValueError, TypeError):
-                    _roas = 0.0
-
-            _top_ads.append((int(_row_idx), _adn, _cat, _roas))
-
-        # Sort: High Performer first, then by ROAS descending within each tier
-        _top_ads.sort(key=lambda x: (_priority.get(x[2], 3), -x[3]))
-
-        # ── Validation: every CSV row must appear exactly once ────────────────
-        if len(_top_ads) != len(_m_df):
+        # Validate: must match CSV length exactly.
+        if len(_rows) != len(_m_df):
             st.error(
-                f"⚠️ Validatiefout: {len(_m_df)} rijen in de CSV, maar "
-                f"{len(_top_ads)} verwerkt. Controleer de CSV op lege of ongeldige rijen."
+                f"⚠️ Validatiefout: {len(_m_df)} rijen in CSV maar "
+                f"{len(_rows)} verwerkt. Controleer de CSV op lege rijen."
             )
             st.stop()
 
-        _img_names     = [img["name"] for img in imgs_data]
-        _img_bytes_map = {img["name"]: img["data"] for img in imgs_data}
-
-        # Smart defaults: one image per ad row, no image used twice
-        # Keyed by csv_row_idx so the mapping survives sort-order changes
-        _defaults: Dict[int, str] = {}   # csv_row_idx → filename
+        # Smart filename defaults: assign the best matching image to each row.
+        # Keyed by row_idx (int) so surviving a re-render never reorders things.
+        _defaults: Dict[int, str] = {}
         _assigned: set = set()
-        for _row_idx, _adn, _, _ in _top_ads:
+        for _row_idx, _adn, _ in _rows:
             _remaining = [n for n in _img_names if n not in _assigned]
             _best = _find_best_image_for_ad(_adn, _remaining)
             _defaults[_row_idx] = _best or "(geen afbeelding)"
             if _best:
                 _assigned.add(_best)
 
-        # ── Performance badge helper ───────────────────────────────────────────
-        _BADGE = {
-            "High Performer": ("#d4edda", "#155724", "🏆 Top"),
-            "Average":        ("#fff3cd", "#856404", "➡️ Gem"),
-            "Underperformer": ("#f8d7da", "#721c24", "⚠️ Laag"),
-            "No Data":        ("#e2e3e5", "#383d41", "❓ N/A"),
-        }
-
-        # ── Column headers ────────────────────────────────────────────────────
-        _hc1, _hc2, _hc3 = st.columns([3, 3, 2])
+        # ── Table header (2-column layout as specified) ───────────────────────
+        _hc1, _hc2 = st.columns([2, 2])
         _hc1.markdown(
             "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
-            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px'>"
-            "Advertentienaam</div>",
+            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:6px'>"
+            "Advertentienaam (uit CSV)</div>",
             unsafe_allow_html=True,
         )
         _hc2.markdown(
             "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
-            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px'>"
+            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:6px'>"
             "Gekoppelde afbeelding</div>",
             unsafe_allow_html=True,
         )
-        _hc3.markdown(
-            "<div style='font-size:0.72rem;font-weight:700;color:#00573C;"
-            "text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px'>"
-            "Voorbeeld</div>",
-            unsafe_allow_html=True,
-        )
-
         st.markdown(
-            "<hr style='margin:0 0 8px 0;border-color:#e0ede6'>",
+            "<hr style='margin:0 0 6px 0;border-color:#e0ede6'>",
             unsafe_allow_html=True,
         )
 
-        # ── Matcher rows — one per unique CSV row, keyed by CSV row-index ─────
-        _selectbox_opts = ["(geen afbeelding)"] + _img_names
-
-        for _row_idx, _adn, _cat, _roas in _top_ads:
-            _bg, _tc, _bl = _BADGE.get(_cat, _BADGE["No Data"])
-            _default_sel  = _defaults.get(_row_idx, "(geen afbeelding)")
-            _default_idx  = (
+        # ── One row per CSV row — keyed by the literal DataFrame row index ────
+        for _row_idx, _adn, _cat in _rows:
+            _sb_key      = f"match_{_row_idx}"   # stable widget key
+            _default_sel = _defaults.get(_row_idx, "(geen afbeelding)")
+            _default_idx = (
                 _selectbox_opts.index(_default_sel)
                 if _default_sel in _selectbox_opts else 0
             )
-            _sb_key = f"match_{_row_idx}"   # CSV row-index, stable across re-renders
 
-            _rc1, _rc2, _rc3 = st.columns([3, 3, 2])
+            _cat_colours = {
+                "High Performer": "#155724",
+                "Average":        "#856404",
+                "Underperformer": "#721c24",
+                "No Data":        "#6c757d",
+            }
+            _cat_labels = {
+                "High Performer": "🏆 Top",
+                "Average":        "➡️ Gem",
+                "Underperformer": "⚠️ Laag",
+                "No Data":        "❓ N/A",
+            }
+            _colour = _cat_colours.get(_cat, "#6c757d")
+            _label  = _cat_labels.get(_cat, _cat)
+
+            _rc1, _rc2 = st.columns([2, 2])
 
             with _rc1:
-                _roas_str = f"ROAS {_roas:.2f}x" if _roas > 0 else ""
                 st.markdown(
-                    f"<div style='padding:6px 0'>"
-                    f"<span style='background:{_bg};color:{_tc};padding:2px 8px;"
-                    f"border-radius:12px;font-size:0.7rem;font-weight:700;"
-                    f"margin-right:6px'>{_bl}</span>"
-                    f"<span style='font-size:0.88rem;font-weight:600;color:#111'>"
+                    f"<div style='padding:8px 4px 6px 0;line-height:1.4'>"
+                    f"<span style='font-size:0.75rem;font-weight:700;color:{_colour};"
+                    f"margin-right:6px'>{_label}</span>"
+                    f"<span style='font-size:0.9rem;font-weight:600;color:#111'>"
                     f"{_adn}</span>"
-                    f"<br><span style='font-size:0.75rem;color:#888'>{_roas_str}</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
 
             with _rc2:
                 st.selectbox(
-                    "Afbeelding",
+                    label="Afbeelding",
                     options=_selectbox_opts,
                     index=_default_idx,
                     key=_sb_key,
                     label_visibility="collapsed",
                 )
 
-            with _rc3:
-                _cur_sel = st.session_state.get(_sb_key, _default_sel)
-                if _cur_sel != "(geen afbeelding)" and _cur_sel in _img_bytes_map:
-                    st.image(_img_bytes_map[_cur_sel], use_container_width=True)
-                else:
-                    st.markdown(
-                        "<div style='background:#f5f5f5;border:1px dashed #ccc;"
-                        "border-radius:6px;height:52px;display:flex;align-items:center;"
-                        "justify-content:center;font-size:0.75rem;color:#aaa'>geen</div>",
-                        unsafe_allow_html=True,
-                    )
-
             st.markdown(
-                "<hr style='margin:2px 0;border-color:#f0f0f0'>",
+                "<hr style='margin:0;border-color:#f0f0f0'>",
                 unsafe_allow_html=True,
             )
 
-        # ── Images not yet assigned (info row) ────────────────────────────────
+        # ── Unassigned images info ─────────────────────────────────────────────
         _all_selected = {
             st.session_state.get(f"match_{_ridx}", _defaults.get(_ridx, "(geen afbeelding)"))
-            for _ridx, _, _, _ in _top_ads
+            for _ridx, _, _ in _rows
         } - {"(geen afbeelding)"}
         _unassigned = [n for n in _img_names if n not in _all_selected]
         if _unassigned:
@@ -1589,8 +1569,7 @@ elif st.session_state.phase == "MATCHER":
                 f"<div style='background:#fff8e1;border:1px solid #f59e0b;"
                 f"border-radius:8px;padding:10px 14px;font-size:0.82rem;color:#7c5a00;"
                 f"margin-top:8px'>ℹ️ <strong>{len(_unassigned)} afbeelding(en) "
-                f"nog niet gekoppeld:</strong> "
-                f"{', '.join(_unassigned)}</div>",
+                f"nog niet gekoppeld:</strong> {', '.join(_unassigned)}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -1612,12 +1591,20 @@ elif st.session_state.phase == "MATCHER":
         )
 
         if _confirm_btn:
-            _final: Dict[str, str] = {}
-            for _row_idx, _adn, _, _ in _top_ads:
+            # Store mapping as {row_index (int): selected_filename (str)}.
+            # Using row_index (not ad_name) as key means two rows with the
+            # same ad name are NEVER collapsed into one — every row is unique.
+            _final: Dict[int, str] = {}
+            for _row_idx, _adn, _ in _rows:
                 _sel = st.session_state.get(f"match_{_row_idx}", "(geen afbeelding)")
                 if _sel != "(geen afbeelding)":
-                    _final[_adn] = _sel
-            st.session_state["final_matches"] = _final
+                    _final[_row_idx] = _sel
+            # Also store the ad_name lookup so LANCERING can resolve names.
+            _row_idx_to_name: Dict[int, str] = {
+                _row_idx: _adn for _row_idx, _adn, _ in _rows
+            }
+            st.session_state["final_matches"]      = _final            # {row_idx: filename}
+            st.session_state["_row_idx_to_name"]   = _row_idx_to_name  # {row_idx: ad_name}
             st.session_state.phase = "LANCERING"
             st.rerun()
 
@@ -1680,6 +1667,8 @@ elif st.session_state.phase == "LANCERING":
         # Stap 2: Visuele analyse — gebruik bevestigde matches uit MATCHER
         analysed: List[Dict] = []
         ad_col = find_column(df, AD_NAME_COLUMNS)
+
+        # perf_map: ad_name → category (for lookup by matched name)
         perf_map: Dict[str, str] = {}
         if ad_col:
             for _, row in df.iterrows():
@@ -1690,9 +1679,20 @@ elif st.session_state.phase == "LANCERING":
         match_confidences: Dict[str, float] = {}
         matched_count = 0
 
-        # Invert final_matches (ad_name → filename) to filename → ad_name
-        final_matches   = st.session_state.get("final_matches", {})
-        filename_to_ad  = {v: k for k, v in final_matches.items()}
+        # final_matches is now {row_idx (int): filename (str)}.
+        # _row_idx_to_name maps row_idx → ad_name for category lookup.
+        final_matches    = st.session_state.get("final_matches", {})      # {row_idx: filename}
+        row_idx_to_name  = st.session_state.get("_row_idx_to_name", {})   # {row_idx: ad_name}
+
+        # Build filename → ad_name from the row-index mapping.
+        # If two rows had the same ad name, each gets its own row_idx key —
+        # no collision. The last assignment wins for filename→name lookup
+        # (acceptable since the same filename can only be matched once).
+        filename_to_ad: Dict[str, str] = {}
+        for _ridx, _fn in final_matches.items():
+            _adn = row_idx_to_name.get(int(_ridx), "")
+            if _adn:
+                filename_to_ad[_fn] = _adn
 
         if imgs_data:
             total_imgs       = len(imgs_data)
