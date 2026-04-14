@@ -1070,6 +1070,109 @@ def match_category(filename: str, perf_map: Dict[str, str]) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Vision pre-processing — extract visual keywords for semantic ad-name matching
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _extract_image_keywords_cached(b64: str, mime: str, filename: str, api_key: str) -> Dict:
+    """GPT-4o vision call (detail=low) — returns visual keywords for semantic matching."""
+    _c = OpenAI(api_key=api_key)
+    prompt = (
+        "Look at this banner ad image. Extract keywords to match it to an ad name.\n"
+        "Return ONLY valid JSON with exactly these keys:\n"
+        "- product (string): main product shown (e.g. 'Ring', 'Necklace', 'Earrings', or '' if unclear)\n"
+        "- promo (string): any promotion/occasion shown (e.g. 'Summer Sale', 'Kingsday', '20% Off', or '' if none)\n"
+        "- colors (array of strings): 1–3 dominant colors (e.g. ['Gold', 'White'])\n"
+        "- keywords (array of lowercase strings): all relevant tokens for matching "
+        "(product type, promo name, colors, style, season, occasion — max 12 items)"
+    )
+    try:
+        response = _c.chat.completions.create(
+            model="gpt-4o",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "low"}},
+                ],
+            }],
+            max_tokens=200,
+            response_format={"type": "json_object"},
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception:
+        return {"product": "", "promo": "", "colors": [], "keywords": []}
+
+
+def _semantic_score(ad_name: str, kw_data: Dict) -> float:
+    """Return 0–1: fraction of significant ad-name tokens that hit at least one image keyword."""
+    keywords = kw_data.get("keywords", [])
+    if not keywords:
+        return 0.0
+    ad_tokens = {t for t in re.sub(r"[_\-]+", " ", ad_name.lower()).split() if len(t) > 2}
+    if not ad_tokens:
+        return 0.0
+    kw_lower = [k.lower() for k in keywords]
+    hits = sum(1 for t in ad_tokens if any(t in k or k in t for k in kw_lower))
+    return hits / len(ad_tokens)
+
+
+def match_image_with_confidence(
+    filename: str,
+    img_keywords: Dict,
+    perf_map: Dict[str, str],
+) -> Tuple[str, str, float]:
+    """
+    Returns (matched_ad_name, category, confidence 0–1).
+
+    Pass 1 — filename slug containment     → confidence 1.0
+    Pass 2 — filename word-overlap         → confidence 0.50–0.85
+    Pass 3 — semantic keyword match        → confidence = keyword score (0–1)
+    Fallback — best word-overlap or stem   → confidence 0.0
+    """
+    stem       = os.path.splitext(filename)[0]
+    stem_lower = stem.lower()
+    stem_clean = re.sub(r"[_\-]+", " ", stem_lower).strip()
+
+    # Pass 1: exact slug / substring containment → high confidence
+    for ad_name, cat in perf_map.items():
+        ad_slug  = ad_name.lower().replace(" ", "_")
+        ad_lower = ad_name.lower()
+        if (ad_slug in stem_lower or stem_lower in ad_slug
+                or ad_lower in stem_clean or stem_clean in ad_lower):
+            return ad_name, cat, 1.0
+
+    # Pass 2: filename word-overlap score
+    stem_words = [w for w in stem_clean.split() if len(w) > 2]
+    best_fn_score, best_fn_name, best_fn_cat = 0, stem, "No Data"
+    for ad_name, cat in perf_map.items():
+        ad_lower  = ad_name.lower()
+        ad_tokens = set(ad_lower.split())
+        exact   = sum(2 for w in stem_words if w in ad_tokens)
+        partial = sum(1 for w in stem_words if any(w in tok or tok in w for tok in ad_tokens))
+        score   = exact + partial
+        if score > best_fn_score:
+            best_fn_score, best_fn_name, best_fn_cat = score, ad_name, cat
+    fn_conf = min(0.50 + best_fn_score * 0.08, 0.85) if best_fn_score > 0 else 0.0
+
+    # Pass 3: semantic keyword match (GPT-extracted visual keywords vs ad-name tokens)
+    best_kw_score, best_kw_name, best_kw_cat = 0.0, stem, "No Data"
+    for ad_name, cat in perf_map.items():
+        score = _semantic_score(ad_name, img_keywords)
+        if score > best_kw_score:
+            best_kw_score, best_kw_name, best_kw_cat = score, ad_name, cat
+
+    # Prefer the higher-confidence strategy
+    if best_kw_score > fn_conf:
+        return best_kw_name, best_kw_cat, best_kw_score
+    elif fn_conf > 0:
+        return best_fn_name, best_fn_cat, fn_conf
+    else:
+        return best_fn_name, best_fn_cat, 0.0
+
+
+# ---------------------------------------------------------------------------
 # Shared helper: named BytesIO for reconstructed uploads
 # ---------------------------------------------------------------------------
 
@@ -1228,7 +1331,7 @@ elif st.session_state.phase == "LANCERING":
         results["df"] = df
         results["metric_used"] = metric_used
 
-        # Stap 2: Visuele analyse — cached per (image content × ad name)
+        # Stap 2: Visuele analyse + semantische koppeling (twee passes)
         analysed: List[Dict] = []
         ad_col = find_column(df, AD_NAME_COLUMNS)
         perf_map: Dict[str, str] = {}
@@ -1236,24 +1339,50 @@ elif st.session_state.phase == "LANCERING":
             for _, row in df.iterrows():
                 perf_map[str(row[ad_col]).strip()] = row.get("performance_category", "No Data")
 
-        image_bytes_map: Dict[str, bytes] = {}
+        image_bytes_map: Dict[str, bytes]   = {}
+        image_keywords_map: Dict[str, Dict] = {}
+        match_confidences: Dict[str, float] = {}
         matched_count = 0
 
         if imgs_data:
+            total_imgs = len(imgs_data)
+
+            # Sub-stap 2a: vision pre-processing — visuele keywords extraheren (detail=low)
             for i, img_info in enumerate(imgs_data):
-                pct = 14 + int(46 * (i + 1) / len(imgs_data))
+                pct = 8 + int(18 * (i + 1) / total_imgs)
                 _prog_bar.progress(
                     pct,
-                    text=f"🔬 Banner doorlichten {i + 1}/{len(imgs_data)}: {img_info['name']}",
+                    text=f"👁️ Visuele keywords extraheren {i + 1}/{total_imgs}: {img_info['name']}",
                 )
-                name, cat = (
-                    match_category(img_info["name"], perf_map)
-                    if perf_map
-                    else (img_info["name"], "No Data")
+                ext  = os.path.splitext(img_info["name"])[1].lower()
+                mime = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
+                b64  = base64.b64encode(img_info["data"]).decode("utf-8")
+                try:
+                    kw_data = _extract_image_keywords_cached(b64, mime, img_info["name"], api_key)
+                except Exception:
+                    kw_data = {"product": "", "promo": "", "colors": [], "keywords": []}
+                image_keywords_map[img_info["name"]] = kw_data
+                image_bytes_map[img_info["name"]]    = img_info["data"]
+
+            # Sub-stap 2b: semantische koppeling + visuele beschrijving (detail=high)
+            for i, img_info in enumerate(imgs_data):
+                pct = 26 + int(34 * (i + 1) / total_imgs)
+                _prog_bar.progress(
+                    pct,
+                    text=f"🔬 Banner doorlichten {i + 1}/{total_imgs}: {img_info['name']}",
                 )
-                if perf_map and name in perf_map:
+                img_kw = image_keywords_map.get(img_info["name"], {})
+                if perf_map:
+                    name, cat, confidence = match_image_with_confidence(
+                        img_info["name"], img_kw, perf_map
+                    )
+                else:
+                    name, cat, confidence = img_info["name"], "No Data", 0.0
+
+                match_confidences[img_info["name"]] = confidence
+                if perf_map and confidence > 0 and name in perf_map:
                     matched_count += 1
-                # Encode image → cached API call (no re-call on reruns)
+
                 ext  = os.path.splitext(img_info["name"])[1].lower()
                 mime = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
                 b64  = base64.b64encode(img_info["data"]).decode("utf-8")
@@ -1262,15 +1391,21 @@ elif st.session_state.phase == "LANCERING":
                 except Exception as e:
                     description = f"_(Fout bij analyseren: {e})_"
                 analysed.append({
-                    "name": name, "filename": img_info["name"],
-                    "category": cat, "description": description,
+                    "name":         name,
+                    "filename":     img_info["name"],
+                    "category":     cat,
+                    "description":  description,
+                    "confidence":   confidence,
+                    "img_keywords": img_kw,
                 })
-                image_bytes_map[img_info["name"]] = img_info["data"]
 
-        results["analysed"]        = analysed
-        results["match_count"]     = matched_count
-        results["total_images"]    = len(imgs_data)
-        results["image_bytes_map"] = image_bytes_map
+        results["analysed"]           = analysed
+        results["match_count"]        = matched_count
+        results["total_images"]       = len(imgs_data)
+        results["image_bytes_map"]    = image_bytes_map
+        results["image_keywords_map"] = image_keywords_map
+        results["match_confidences"]  = match_confidences
+        results["perf_map"]           = perf_map
 
         # Stap 3: Strategische vergelijking — cached per context hash
         high   = [a for a in analysed if a["category"] == "High Performer"]
@@ -1392,13 +1527,21 @@ elif st.session_state.phase == "RESULTS":
     with _main_area.container():
         mc = r.get("match_count", 0)
         ti = r.get("total_images", 0)
+        uncertain_count = sum(
+            1 for a in r.get("analysed", []) if a.get("confidence", 1.0) < 0.8
+        )
         if ti > 0:
-            icon = "✅" if mc == ti else ("⚠️" if mc > 0 else "❌")
+            icon = "✅" if (mc == ti and uncertain_count == 0) else ("⚠️" if mc > 0 else "❌")
+            extra = (
+                f" &nbsp;·&nbsp; <span style='color:#e63946;font-weight:600'>"
+                f"{uncertain_count} onzeker — zie ↓ Match advertenties aan banners</span>"
+                if uncertain_count > 0 else ""
+            )
             st.markdown(
                 f"<div style='background:#edfaf3;border:1px solid #33B784;border-radius:8px;"
                 f"padding:8px 16px;margin-bottom:8px;font-size:0.9rem'>"
                 f"{icon} <strong>Koppelstatus:</strong> {mc} van de {ti} afbeeldingen "
-                f"succesvol gekoppeld aan de CSV-data.</div>",
+                f"gekoppeld aan de CSV-data.{extra}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -1740,6 +1883,108 @@ elif st.session_state.phase == "RESULTS":
                             )
 
                 st.divider()
+
+    # ── Manual Override: handmatig koppelen van onzekere banners ────────────────
+    _perf_map  = r.get("perf_map", {})
+    _uncertain = [a for a in analysed if a.get("confidence", 1.0) < 0.8]
+
+    if _uncertain and _perf_map:
+        st.markdown(
+            "<div style='height:8px'></div>",
+            unsafe_allow_html=True,
+        )
+        with st.expander("🔗 Match advertenties aan banners", expanded=True):
+            st.markdown(
+                "<div style='font-size:0.9rem;color:#444;margin-bottom:14px'>"
+                "De AI was onzeker over onderstaande koppelingen (onder 80% zekerheid). "
+                "Selecteer de juiste advertentienaam per banner om de creatieve briefings te verbeteren."
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            ad_name_opts = list(_perf_map.keys())
+
+            for _ad_item in _uncertain:
+                _fname = _ad_item["filename"]
+                _cur   = _ad_item["name"]
+                _conf  = int(_ad_item.get("confidence", 0) * 100)
+                _kw    = _ad_item.get("img_keywords", {})
+                kw_tags = ", ".join(_kw.get("keywords", [])[:8])
+
+                oc1, oc2, oc3 = st.columns([1, 2, 3])
+                with oc1:
+                    _thumb = image_bytes_map.get(_fname)
+                    if _thumb:
+                        st.image(_thumb, width=90)
+                    short_name = (_fname[:28] + "…") if len(_fname) > 28 else _fname
+                    st.caption(short_name)
+                with oc2:
+                    st.markdown(
+                        f"<div style='font-size:0.78rem;color:#6c757d;margin-bottom:6px'>"
+                        f"Visueel: <em>{kw_tags or '—'}</em></div>"
+                        f"<div style='font-size:0.82rem;color:#555'>"
+                        f"Huidig: <strong>{_cur}</strong><br>"
+                        f"<span style='color:#e63946'>{_conf}% zekerheid</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                with oc3:
+                    default_idx = (
+                        ad_name_opts.index(_cur) + 1
+                        if _cur in ad_name_opts else 0
+                    )
+                    st.selectbox(
+                        "Advertentienaam",
+                        options=["(ongewijzigd)"] + ad_name_opts,
+                        index=default_idx,
+                        key=f"override_{_fname}",
+                        label_visibility="collapsed",
+                    )
+
+            st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+            if st.button(
+                "✅ Toepassen & Briefings Opnieuw Genereren",
+                type="primary",
+                use_container_width=True,
+            ):
+                _updated = False
+                for _ad_item in _uncertain:
+                    _fname    = _ad_item["filename"]
+                    _new_name = st.session_state.get(f"override_{_fname}", "(ongewijzigd)")
+                    if _new_name != "(ongewijzigd)" and _new_name in _perf_map:
+                        for _i, _a in enumerate(analysed):
+                            if _a["filename"] == _fname:
+                                analysed[_i]["name"]       = _new_name
+                                analysed[_i]["category"]   = _perf_map[_new_name]
+                                analysed[_i]["confidence"] = 1.0
+                                _updated = True
+                                break
+
+                if _updated:
+                    # Rebuild full report with corrected ad-name mappings
+                    _rpt = ["# Meta Ads Visueel Analyserapport", ""]
+                    for _a in analysed:
+                        _rpt += [
+                            f"## {_a['name']} ({CATEGORY_NL.get(_a['category'], _a['category'])})",
+                            _a["description"], "",
+                        ]
+                    if r.get("analysis_text"):
+                        _rpt += ["## Strategische Analyse", r["analysis_text"]]
+                    _new_report    = "\n".join(_rpt)
+                    _new_filenames = tuple(_a["filename"] for _a in analysed)
+                    try:
+                        _new_concepts = _generate_concepts_cached(
+                            _new_report, _new_filenames, api_key
+                        )
+                        r["analysed"]    = analysed
+                        r["concepts"]    = _new_concepts
+                        r["full_report"] = _new_report
+                        st.session_state["results"] = r
+                        st.success("✅ Koppelingen bijgewerkt — briefings zijn opnieuw gegenereerd!")
+                        st.rerun()
+                    except Exception as _ov_err:
+                        st.error(f"Fout bij regenereren: {_ov_err}")
+                else:
+                    st.info("Geen wijzigingen — selecteer een andere advertentienaam per banner.")
 
     st.markdown(
         "<div class='ok-footer'>"
