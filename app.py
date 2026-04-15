@@ -2034,11 +2034,27 @@ elif st.session_state.phase == "RESULTS":
         # classify_ads already cleaned ROAS/Spend/Revenue columns to floats;
         # _parse_num_col is a safe fallback for any column that may still be a string.
         def _parse_num_col(series: pd.Series) -> pd.Series:
-            # If the column is already numeric, pass through directly
+            """
+            Robust numeric parser for Dutch Meta Ads exports.
+
+            Handles: '1.234,56', '€ 1.234', '3.597,12', plain ints/floats.
+            Strategy for Dutch format — dots = thousands sep, comma = decimal:
+              strip currency → remove dots → swap comma → pd.to_numeric.
+            Returns float Series; unparseable / missing values → 0.0 (never NaN).
+            """
             if pd.api.types.is_numeric_dtype(series):
-                return series
-            # Otherwise apply the same context-aware Dutch/English parser
-            return series.apply(clean_dutch_number)
+                return series.fillna(0.0)
+            cleaned = (
+                series.astype(str)
+                .str.replace(r"[€$£]", "", regex=True)
+                .str.replace("EUR", "", regex=False)
+                .str.strip()
+            )
+            return pd.to_numeric(
+                cleaned.str.replace(".", "", regex=False)
+                       .str.replace(",", ".", regex=False),
+                errors="coerce",
+            ).fillna(0.0)
 
         spend_col     = find_column(df, SPEND_COLUMNS)
         roas_col_kpi  = find_column(df, ROAS_COLUMNS_KPI)
@@ -2059,30 +2075,34 @@ elif st.session_state.phase == "RESULTS":
 
         k1, k2, k3 = st.columns(3)
 
-        # Totaal Spend
-        total_spend_num = None
+        # Totaal Spend — sum is always a float now (NaN→0 inside _parse_num_col)
+        total_spend_num = 0.0
         total_spend_str = "—"
         if spend_col:
             total_spend_num = _parse_num_col(df[spend_col]).sum()
-            if pd.notna(total_spend_num):
+            if total_spend_num > 0:
                 total_spend_str = fmt_nl(total_spend_num, prefix="EUR ")
         _kpi_card(k1, "Totaal Spend", total_spend_str)
 
-        # Gemiddelde ROAS = Total Revenue / Total Spend (weighted, not simple mean)
+        # Gemiddelde ROAS = Total Revenue / Total Spend (weighted)
+        # Zero-division safe: only enters branch when total_spend_num > 0
         avg_roas_str = "—"
-        if roas_col_kpi and spend_col and total_spend_num and total_spend_num > 0:
-            roas_num  = _parse_num_col(df[roas_col_kpi])
-            spend_num = _parse_num_col(df[spend_col])
+        if roas_col_kpi and spend_col and total_spend_num > 0:
+            roas_num      = _parse_num_col(df[roas_col_kpi])
+            spend_num     = _parse_num_col(df[spend_col])
             total_revenue = (roas_num * spend_num).sum()
-            if pd.notna(total_revenue):
+            if total_revenue > 0:
                 avg_roas_str = fmt_nl(total_revenue / total_spend_num) + "x"
         elif roas_col_kpi and not spend_col:
-            val = _parse_num_col(df[roas_col_kpi]).mean()
-            if pd.notna(val):
-                avg_roas_str = fmt_nl(val) + "x"
+            # No spend column — simple mean of nonzero ROAS values
+            _roas_vals = _parse_num_col(df[roas_col_kpi])
+            _nonzero   = _roas_vals[_roas_vals > 0]
+            if not _nonzero.empty:
+                avg_roas_str = fmt_nl(_nonzero.mean()) + "x"
         _kpi_card(k2, "Gemiddelde ROAS", avg_roas_str)
 
-        # Beste Advertentie — highest ROAS among ads that have actual spend
+        # Beste Advertentie — highest ROAS among High Performer ads with actual spend
+        # Guard: idxmax() raises ValueError when the series is all-NA → use dropna() first
         best_ad_str = "—"
         if ad_col_kpi and roas_col_kpi:
             hp = df[df["performance_category"] == "High Performer"].copy()
@@ -2090,11 +2110,18 @@ elif st.session_state.phase == "RESULTS":
                 hp_roas = _parse_num_col(hp[roas_col_kpi])
                 if spend_col:
                     hp_spend = _parse_num_col(hp[spend_col])
-                    hp_roas = hp_roas.where(hp_spend > 0)  # ignore zero-spend rows
-                best_idx = hp_roas.idxmax()
-                if pd.notna(best_idx):
+                    # NaN out rows with zero spend so they can't win idxmax
+                    hp_roas = hp_roas.where(hp_spend > 0)
+                # Only consider rows with a valid positive ROAS
+                _valid = hp_roas.dropna()
+                _valid = _valid[_valid > 0]
+                if not _valid.empty:
+                    best_idx = _valid.idxmax()          # safe: guaranteed ≥1 value
                     name_val = str(hp.loc[best_idx, ad_col_kpi])
-                    best_ad_str = name_val[:28] + "…" if len(name_val) > 28 else name_val
+                else:
+                    # Fallback: first HP ad when ROAS data is absent or all zero
+                    name_val = str(hp.iloc[0][ad_col_kpi])
+                best_ad_str = name_val[:28] + "…" if len(name_val) > 28 else name_val
         _kpi_card(k3, "Beste Advertentie", best_ad_str)
 
         st.divider()
