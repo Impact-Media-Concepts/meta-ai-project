@@ -314,8 +314,8 @@ with st.sidebar:
             st.session_state.phase = "UPLOAD"
             st.rerun()
 
-    elif _phase_now == "RESULTS" and "results" in st.session_state:
-        _sr = st.session_state["results"]
+    elif _phase_now == "RESULTS" and "full_analysis_data" in st.session_state:
+        _sr = st.session_state["full_analysis_data"]
 
         # ── Downloads ─────────────────────────────────────────────────────
         st.markdown(
@@ -340,13 +340,15 @@ with st.sidebar:
             mime="text/markdown",
             use_container_width=True,
         )
-        st.download_button(
-            "📊 Download CSV",
-            data=_sr["df"].to_csv(index=False).encode("utf-8"),
-            file_name="geclassificeerde_advertenties.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+        _csv_df = _sr.get("df")
+        if _csv_df is not None:
+            st.download_button(
+                "📊 Download CSV",
+                data=_csv_df.to_csv(index=False).encode("utf-8"),
+                file_name="geclassificeerde_advertenties.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
         st.divider()
 
         # ── Master Prompt how-to ───────────────────────────────────────────
@@ -370,7 +372,7 @@ with st.sidebar:
             st.session_state.phase = "UPLOAD"
             st.rerun()
         if st.button("↩️ Nieuwe analyse starten", use_container_width=True):
-            for _k in ("results", "_csv_bytes", "_csv_name", "_imgs", "final_matches"):
+            for _k in ("full_analysis_data", "results", "_csv_bytes", "_csv_name", "_imgs", "final_matches", "_row_idx_to_name"):
                 st.session_state.pop(_k, None)
             for _k in [k for k in st.session_state if k.startswith("match_")]:
                 del st.session_state[_k]
@@ -400,7 +402,7 @@ if "phase" not in st.session_state:
     st.session_state.phase = "UPLOAD"
 
 # Guard 1: pipeline finished but phase wasn't advanced (mid-rerun edge case)
-if st.session_state.phase == "LANCERING" and "results" in st.session_state:
+if st.session_state.phase == "LANCERING" and "full_analysis_data" in st.session_state:
     st.session_state.phase = "RESULTS"
 
 # Guard 2: user refreshed during LANCERING — session memory is gone
@@ -1874,6 +1876,9 @@ elif st.session_state.phase == "LANCERING":
             results["pdf_bytes"] = b""
 
         _prog_bar.progress(100, text="🌕 Geland op de maan! Dashboard laden...")
+        # Save under canonical key used by the entire Results dashboard.
+        # "results" is kept as an alias for backward-compat with sidebar guards.
+        st.session_state["full_analysis_data"] = results
         st.session_state["results"] = results
         st.session_state.phase = "RESULTS"
         st.rerun()
@@ -1905,30 +1910,45 @@ elif st.session_state.phase == "RESULTS":
         height=0,
     )
 
-    # ── Guard: results missing (page refresh, or pipeline never completed) ─────
-    if "results" not in st.session_state or not isinstance(st.session_state.get("results"), dict):
+    # ── Guard: full_analysis_data missing (page refresh / pipeline crash) ───────
+    if "full_analysis_data" not in st.session_state:
         with _main_area.container():
-            st.warning(
-                "De analyseresultaten zijn niet meer beschikbaar. "
-                "Dit gebeurt na een paginaverversing. Start een nieuwe analyse.",
-                icon="⚠️",
-            )
+            st.error("Data ontbreekt — start een nieuwe analyse.", icon="❌")
             if st.button("← Terug naar Pre-Flight Matcher", type="primary", use_container_width=True):
                 st.session_state.phase = "MATCHER"
                 st.rerun()
         st.stop()
 
-    r: dict                   = st.session_state["results"]
+    r: dict = st.session_state["full_analysis_data"]
+
+    # All values come from a single locked dict — use .get() with safe defaults.
     df: pd.DataFrame          = r.get("df")
     metric_used: str          = r.get("metric_used", "—")
-    analysed: List[Dict]      = r.get("analysed", [])
-    concepts: List[Dict]      = r.get("concepts", [])
-    image_bytes_map: Dict[str, bytes] = r.get("image_bytes_map", {})
+    analysed: List[Dict]      = r.get("analysed") or []
+    concepts: List[Dict]      = r.get("concepts") or []
+    image_bytes_map: Dict[str, bytes] = r.get("image_bytes_map") or {}
+    perf_map_r: Dict[str, str]        = r.get("perf_map") or {}
 
-    # Secondary guard: df is the minimum required to render anything useful.
-    if df is None or not isinstance(df, pd.DataFrame):
+    # Secondary guard: df is the minimum required to render the dashboard.
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         with _main_area.container():
-            st.error("Analysedata onvolledig. Start een nieuwe analyse.", icon="❌")
+            st.error(
+                "De campagnedata kon niet worden geladen. "
+                "Controleer de CSV en start een nieuwe analyse.",
+                icon="❌",
+            )
+            if st.button("← Terug naar Matcher", type="primary", use_container_width=True):
+                st.session_state.phase = "MATCHER"
+                st.rerun()
+        st.stop()
+
+    if "performance_category" not in df.columns:
+        with _main_area.container():
+            st.error(
+                "Kolom 'performance_category' ontbreekt in de data. "
+                "Start een nieuwe analyse.",
+                icon="❌",
+            )
             if st.button("← Terug naar Matcher", type="primary", use_container_width=True):
                 st.session_state.phase = "MATCHER"
                 st.rerun()
@@ -2355,7 +2375,7 @@ elif st.session_state.phase == "RESULTS":
                 st.divider()
 
     # ── Manual Override: handmatig koppelen van onzekere banners ────────────────
-    _perf_map  = r.get("perf_map", {})
+    _perf_map  = perf_map_r
     _uncertain = [a for a in analysed if a.get("confidence", 1.0) < 0.8]
 
     if _uncertain and _perf_map:
@@ -2448,6 +2468,7 @@ elif st.session_state.phase == "RESULTS":
                         r["analysed"]    = analysed
                         r["concepts"]    = _new_concepts
                         r["full_report"] = _new_report
+                        st.session_state["full_analysis_data"] = r
                         st.session_state["results"] = r
                         st.success("✅ Koppelingen bijgewerkt — briefings zijn opnieuw gegenereerd!")
                         st.rerun()
