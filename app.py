@@ -372,7 +372,9 @@ with st.sidebar:
             st.session_state.phase = "UPLOAD"
             st.rerun()
         if st.button("↩️ Nieuwe analyse starten", use_container_width=True):
-            for _k in ("full_analysis_data", "results", "_csv_bytes", "_csv_name", "_imgs", "final_matches", "_row_idx_to_name"):
+            for _k in ("full_analysis_data", "results", "_csv_bytes", "_csv_name", "_imgs",
+                       "final_matches", "_row_idx_to_name",
+                       "_brand_name", "_brand_product", "_brand_focus"):
                 st.session_state.pop(_k, None)
             for _k in [k for k in st.session_state if k.startswith("match_")]:
                 del st.session_state[_k]
@@ -635,7 +637,12 @@ def compare_creatives(
 
 
 def generate_concepts(
-    client: OpenAI, analysis_report: str, image_filenames: Optional[List[str]] = None
+    client: OpenAI,
+    analysis_report: str,
+    image_filenames: Optional[List[str]] = None,
+    brand_name: str = "",
+    brand_product: str = "",
+    brand_focus: str = "",
 ) -> List[Dict]:
     """
     Returns a list of concept dicts with keys:
@@ -644,6 +651,29 @@ def generate_concepts(
     referentie_afbeelding, master_prompt
     """
     image_filenames = image_filenames or []
+
+    # ── Brand context — injected into system_msg and prompt ─────────────────
+    _has_brand   = bool(brand_name or brand_product or brand_focus)
+    _brand_label = brand_name    or "dit merk"
+    _brand_prod  = brand_product or "de geadverteerde producten"
+    _brand_foc   = brand_focus   or "de campagnefocus"
+    _brand_guard = (
+        f"MERKCONTEXT — STRIKTE NALEVING VEREIST:\n"
+        f"• Merknaam: {_brand_label}\n"
+        f"• Productcategorie: {_brand_prod}\n"
+        f"• Campagnefocus: {_brand_foc}\n"
+        f"IJZEREN REGEL: Alle 10 concepten MOETEN 100% relevant zijn aan {_brand_label} en "
+        f"de productcategorie '{_brand_prod}'. "
+        f"Als het merk kleding verkoopt → schrijf UITSLUITEND over kleding. "
+        f"Als het merk sieraden verkoopt → schrijf UITSLUITEND over sieraden. "
+        f"Nooit afwijken naar dieren, andere productcategorieën of niet-gerelateerde thema's. "
+        f"Campagnefocus '{_brand_foc}' is leidend voor elk concept.\n"
+    ) if _has_brand else ""
+    _brand_role = (
+        f"die werkt voor het merk {_brand_label} ({_brand_prod})"
+        if _has_brand else "voor een Nederlandse adverteerder"
+    )
+
     filenames_block = (
         "Beschikbare referentie-afbeeldingen (exacte bestandsnamen — alleen gebruiken voor het veld "
         "referentie_afbeelding, NIET als tekst in de master_prompt):\n"
@@ -653,36 +683,49 @@ def generate_concepts(
     )
 
     system_msg = (
-        "Je bent een senior copywriter en creatief directeur voor een high-end Nederlandse sieraden-"
-        "webshop. Je schrijft Instagram-waardige advertentieteksten: pakkend, menselijk, direct.\n"
-        # ── Skill library: marketing-psychology ──────────────────────────────
-        # Verwerk deze principes IMPLICIET — noem ze NOOIT letterlijk in de output.
-        "PSYCHOLOGISCHE PRINCIPES (verwerk stilzwijgend in elke tekst):\n"
-        "• Verliesaversie: frame voordelen als iets wat de lezer mist als ze NIET handelen.\n"
-        "• Social Proof: verwijs subtiel naar populariteit ('de ring waar iedereen naar vraagt').\n"
-        "• Schaarste: laat urgentie voelen via seizoen of editie — nooit nep of opgedrongen.\n"
-        "• Nieuwsgierigheid-loops: open met een vraag of stelling die verder trekt.\n"
-        "• Zeigarnik: laat de hook een open loop die de primary text afsluit.\n"
-        # ── Skill library: copywriting ───────────────────────────────────────
-        "COPYWRITING PRINCIPES:\n"
-        "• Voordelen boven features — 'draagt als lucht' > '14-karaats goud'.\n"
-        "• Specificiteit slaat vaagheid — vermijd 'prachtig', 'bijzonder', 'uniek'.\n"
-        "• Actieve stem. Directe aanspreekvorm ('je', 'jouw'). Geen passieve constructies.\n"
-        "• Elke hook stopt de scroll: doorbreek een verwachting of raak een herkenbaar gevoel.\n"
-        # ── Skill library: ai-seo ────────────────────────────────────────────
-        "SEO-BEWUST SCHRIJVEN (longtail zoekintentie organisch in de tekst):\n"
-        "• Werk concrete, intentie-gedreven zinnen in: 'ring als cadeau voor haar', "
-        "'gouden oorbellen zomer', 'statement sieraad voor bruiloft'.\n"
-        "• Specificaties die AI-zoekmachines kunnen extraheren: materiaal, gelegenheid, doelgroep.\n"
+        f"Je bent een senior copywriter en creatief directeur {_brand_role}. "
+        + "Je schrijft Instagram-waardige advertentieteksten: pakkend, menselijk, direct.\n"
+        + _brand_guard
+        + (
+            # ── Skill library: marketing-psychology ──────────────────────────
+            "PSYCHOLOGISCHE PRINCIPES (verwerk stilzwijgend in elke tekst):\n"
+            "• Verliesaversie: frame voordelen als iets wat de lezer mist als ze NIET handelen.\n"
+            "• Social Proof: verwijs subtiel naar populariteit.\n"
+            "• Schaarste: laat urgentie voelen via seizoen of editie — nooit nep of opgedrongen.\n"
+            "• Nieuwsgierigheid-loops: open met een vraag of stelling die verder trekt.\n"
+            "• Zeigarnik: laat de hook een open loop die de primary text afsluit.\n"
+            # ── Skill library: copywriting ────────────────────────────────────
+            "COPYWRITING PRINCIPES:\n"
+            "• Voordelen boven features — beschrijf gevoel en transformatie, niet specificaties.\n"
+            "• Specificiteit slaat vaagheid — vermijd 'prachtig', 'bijzonder', 'uniek'.\n"
+            "• Actieve stem. Directe aanspreekvorm ('je', 'jouw'). Geen passieve constructies.\n"
+            "• Elke hook stopt de scroll: doorbreek een verwachting of raak een herkenbaar gevoel.\n"
+            # ── Skill library: ai-seo ─────────────────────────────────────────
+            "SEO-BEWUST SCHRIJVEN (longtail zoekintentie organisch in de tekst):\n"
+            "• Werk concrete, intentie-gedreven zinnen in die de doelgroep werkelijk gebruikt.\n"
+            "• Specificaties die AI-zoekmachines kunnen extraheren: materiaal, gelegenheid, doelgroep.\n"
+        )
         + TONE_INSTRUCTION
     )
-    prompt = (
-        "Hieronder staat een visueel analyserapport van een 'Summer Sale'-campagne.\n\n"
-        f"---\n{analysis_report}\n---\n\n"
-        f"{filenames_block}\n\n"
+    _brand_prompt_intro = (
+        f"MERK: {_brand_label} | PRODUCT: {_brand_prod} | CAMPAGNEFOCUS: {_brand_foc}\n\n"
+        if _has_brand else ""
+    )
+    _concept_intro = (
+        f"Genereer 10 nieuwe Meta-advertentieconcepten voor {_brand_label}. "
+        "Elk concept MOET 100% on-brand zijn — geen afwijkende productcategorieën, "
+        "geen niet-gerelateerde thema's.\n\n"
+        if _has_brand else
         "Genereer op basis van de winnende patronen 10 nieuwe Meta-advertentieconcepten.\n\n"
-
-        "COPYWRITING-STIJLGIDS — volg dit strikt:\n"
+    )
+    prompt = (
+        "Hieronder staat een visueel analyserapport van een Meta Ads campagne.\n\n"
+        + _brand_prompt_intro
+        + f"---\n{analysis_report}\n---\n\n"
+        + f"{filenames_block}\n\n"
+        + _concept_intro
+        + (
+            "COPYWRITING-STIJLGIDS — volg dit strikt:\n"
         "TOON: Spreek de lezer aan met 'je/jouw', nooit 'u'. Licht maar elegant. Menselijk, niet corporate.\n"
         "HOOK (thumb-stopper): De eerste zin die de scroll stopt. Persoonlijk, prikkelend of emotioneel. "
         "Max. 10 woorden. VERBODEN: 'Ontdek de magie', 'Shop nu', 'Tijdelijk aanbod', "
@@ -738,6 +781,7 @@ def generate_concepts(
         "- Elk concept voelt uniek aan — geen herhalingen in toon of structuur.\n"
         "- Alle tekstvelden behalve master_prompt in het Nederlands.\n"
         "- Retourneer ALLEEN het JSON-object, geen extra tekst."
+        )   # closes the + ( block opened at COPYWRITING-STIJLGIDS
     )
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -857,11 +901,21 @@ def _compare_creatives_cached(context: str, api_key: str) -> str:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _generate_concepts_cached(
-    analysis_report: str, filenames_tuple: tuple, api_key: str
+    analysis_report: str,
+    filenames_tuple: tuple,
+    api_key: str,
+    brand_name: str = "",
+    brand_product: str = "",
+    brand_focus: str = "",
 ) -> list:
-    """GPT-4o concepts call — cached 1 h by (report, filenames) hash."""
+    """GPT-4o concepts call — cached 1 h by (report, filenames, brand context) hash."""
     return generate_concepts(
-        OpenAI(api_key=api_key), analysis_report, list(filenames_tuple)
+        OpenAI(api_key=api_key),
+        analysis_report,
+        list(filenames_tuple),
+        brand_name=brand_name,
+        brand_product=brand_product,
+        brand_focus=brand_focus,
     )
 
 
@@ -1350,6 +1404,44 @@ if st.session_state.phase == "UPLOAD":
             )
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # ── Brand & Campaign Context ──────────────────────────────────────────
+        st.markdown(
+            "<div style='background:linear-gradient(135deg,#00573C 0%,#33B784 100%);"
+            "color:#fff;padding:16px 22px 14px;border-radius:12px;margin-bottom:16px'>"
+            "<div style='font-size:1.05rem;font-weight:800;font-family:Rubik,sans-serif'>"
+            "🎯 Merk &amp; Campagne Context</div>"
+            "<div style='font-size:0.82rem;opacity:.88;margin-top:3px'>"
+            "Geef de AI merkcontext zodat de briefings 100% on-brand blijven.</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        ctx1, ctx2, ctx3 = st.columns(3)
+        with ctx1:
+            brand_name = st.text_input(
+                "Merknaam",
+                value=st.session_state.get("_brand_name", ""),
+                placeholder="bijv. 24 Uomo",
+                help="De naam van het merk waarvoor je adverteert.",
+            )
+        with ctx2:
+            brand_product = st.text_input(
+                "Wat verkopen we?",
+                value=st.session_state.get("_brand_product", ""),
+                placeholder="bijv. Herenkleding, premium streetwear",
+                help="Beschrijf het product of de productcategorie zo specifiek mogelijk.",
+            )
+        with ctx3:
+            brand_focus = st.text_input(
+                "Focus van deze campagne",
+                value=st.session_state.get("_brand_focus", ""),
+                placeholder="bijv. Koningsdag collectie, oranje items",
+                help="Geef aan welk thema, seizoen of aanbod centraal staat in deze campagne.",
+            )
+
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+        st.divider()
+
         col_csv, col_img = st.columns(2)
 
         with col_csv:
@@ -1419,8 +1511,12 @@ if st.session_state.phase == "UPLOAD":
 
         if start_btn and csv_file:
             csv_file.seek(0)
-            st.session_state["_csv_bytes"] = csv_file.read()
-            st.session_state["_csv_name"]  = csv_file.name
+            st.session_state["_csv_bytes"]    = csv_file.read()
+            st.session_state["_csv_name"]     = csv_file.name
+            # Persist brand context so it survives phase transitions
+            st.session_state["_brand_name"]   = brand_name.strip()
+            st.session_state["_brand_product"] = brand_product.strip()
+            st.session_state["_brand_focus"]  = brand_focus.strip()
             st.session_state["_imgs"] = []
             for _img in (uploaded_images or []):
                 _img.seek(0)
@@ -1847,7 +1943,12 @@ elif st.session_state.phase == "LANCERING":
         _prog_bar.progress(78, text="✍️ Master Prompts engineeren...")
         try:
             concepts = _generate_concepts_cached(
-                full_report, tuple(img_filenames), api_key
+                full_report,
+                tuple(img_filenames),
+                api_key,
+                brand_name=st.session_state.get("_brand_name", ""),
+                brand_product=st.session_state.get("_brand_product", ""),
+                brand_focus=st.session_state.get("_brand_focus", ""),
             )
         except Exception:
             pass  # surfaced as warning in Phase 3
@@ -2525,7 +2626,12 @@ elif st.session_state.phase == "RESULTS":
                     _new_filenames = tuple(_a["filename"] for _a in analysed)
                     try:
                         _new_concepts = _generate_concepts_cached(
-                            _new_report, _new_filenames, api_key
+                            _new_report,
+                            _new_filenames,
+                            api_key,
+                            brand_name=st.session_state.get("_brand_name", ""),
+                            brand_product=st.session_state.get("_brand_product", ""),
+                            brand_focus=st.session_state.get("_brand_focus", ""),
                         )
                         r["analysed"]    = analysed
                         r["concepts"]    = _new_concepts
