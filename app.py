@@ -654,7 +654,26 @@ def generate_concepts(
 
     system_msg = (
         "Je bent een senior copywriter en creatief directeur voor een high-end Nederlandse sieraden-"
-        "webshop. Je schrijft Instagram-waardige advertentieteksten: pakkend, menselijk, direct. "
+        "webshop. Je schrijft Instagram-waardige advertentieteksten: pakkend, menselijk, direct.\n"
+        # ── Skill library: marketing-psychology ──────────────────────────────
+        # Verwerk deze principes IMPLICIET — noem ze NOOIT letterlijk in de output.
+        "PSYCHOLOGISCHE PRINCIPES (verwerk stilzwijgend in elke tekst):\n"
+        "• Verliesaversie: frame voordelen als iets wat de lezer mist als ze NIET handelen.\n"
+        "• Social Proof: verwijs subtiel naar populariteit ('de ring waar iedereen naar vraagt').\n"
+        "• Schaarste: laat urgentie voelen via seizoen of editie — nooit nep of opgedrongen.\n"
+        "• Nieuwsgierigheid-loops: open met een vraag of stelling die verder trekt.\n"
+        "• Zeigarnik: laat de hook een open loop die de primary text afsluit.\n"
+        # ── Skill library: copywriting ───────────────────────────────────────
+        "COPYWRITING PRINCIPES:\n"
+        "• Voordelen boven features — 'draagt als lucht' > '14-karaats goud'.\n"
+        "• Specificiteit slaat vaagheid — vermijd 'prachtig', 'bijzonder', 'uniek'.\n"
+        "• Actieve stem. Directe aanspreekvorm ('je', 'jouw'). Geen passieve constructies.\n"
+        "• Elke hook stopt de scroll: doorbreek een verwachting of raak een herkenbaar gevoel.\n"
+        # ── Skill library: ai-seo ────────────────────────────────────────────
+        "SEO-BEWUST SCHRIJVEN (longtail zoekintentie organisch in de tekst):\n"
+        "• Werk concrete, intentie-gedreven zinnen in: 'ring als cadeau voor haar', "
+        "'gouden oorbellen zomer', 'statement sieraad voor bruiloft'.\n"
+        "• Specificaties die AI-zoekmachines kunnen extraheren: materiaal, gelegenheid, doelgroep.\n"
         + TONE_INSTRUCTION
     )
     prompt = (
@@ -712,23 +731,7 @@ def generate_concepts(
         "  (4) De [Style] sectie dekt verplicht: lighting (bv. soft diffused studio light), "
         "      camera angle (bv. close-up hero shot), composition (bv. rule of thirds, negative space).\n"
         "  (5) De [Integration] regel is altijd letterlijk: "
-        "      'Seamlessly integrate the product from the provided reference image into this scene.'\n"
-        "- seo_boost (object): AI-SEO & Strategie Boost — gebaseerd op de principes van AI-zoekmachine-"
-        "optimalisatie, conversie-copywriting en marketingpsychologie. Object met precies deze sleutels:\n"
-        "  * keywords (array van strings): 3–5 specifieke zoekwoorden die de doelgroep gebruikt op "
-        "    Google, Meta of Pinterest voor dit type product/campagne. Vermijd generieke termen als "
-        "'sieraden' of 'kopen' — kies longtail, intentie-gedreven woorden "
-        "(bv. 'gouden ring zomercollectie', 'cadeau voor haarzelf', 'elegante statement ring').\n"
-        "  * meta_description (string): 40–60 woorden, extractable AI-snippet die het concept samenvat "
-        "    als zelfstandige informatieve zin — geschreven voor AI-zoekmachines zoals Google AI Overviews "
-        "    en Perplexity. Schrijf dit als beschrijving van het concept, niet als advertentietekst. "
-        "    Begin direct met de kern. Geen slogans, geen call-to-action.\n"
-        "  * psychological_trigger (string): de primaire psychologische prikkel die dit concept "
-        "    aanstuurt — kies één van: 'Verliesaversie', 'Social Proof', 'Schaarste/Urgentie', "
-        "    'Nieuwsgierigheid', 'IKEA-effect', 'Wederkerigheid', 'Status', 'Angst voor spijt'.\n"
-        "  * copywriting_angle (string): het creatieve invalshoek-type — kies één van: "
-        "    'Pijnpunt', 'Resultaat', 'Social Proof', 'Nieuwsgierigheid', "
-        "    'Vergelijking', 'Urgentie', 'Identiteit', 'Contrair'.\n\n"
+        "      'Seamlessly integrate the product from the provided reference image into this scene.'\n\n"
         "Extra regels:\n"
         "- Bouw voort op de winnende patronen: dubbel aanbod, elegante close-ups, aspirationeel model.\n"
         "- Varieer de haakjes: nieuwsgierigheid, social proof, urgentie, storytelling, voordeel.\n"
@@ -1873,16 +1876,6 @@ elif st.session_state.phase == "LANCERING":
                 "",
                 f"**Rationale:** {c.get('rationale', '—')}",
                 "",
-                "---",
-                "#### 🚀 AI-SEO & Strategy Boost",
-                "",
-                f"**Keywords:** {', '.join(((c.get('seo_boost') or {}).get('keywords') or []))}",
-                "",
-                f"**Meta-beschrijving:** {((c.get('seo_boost') or {}).get('meta_description') or '—')}",
-                "",
-                f"**Psychologische prikkel:** {((c.get('seo_boost') or {}).get('psychological_trigger') or '—')}  |  **Invalshoek:** {((c.get('seo_boost') or {}).get('copywriting_angle') or '—')}",
-                "",
-                "---",
                 "**Master Prompt (Freepik / Nano Banana Pro):**",
                 "", "```", c.get("master_prompt", "—"), "```", "",
             ]
@@ -1936,12 +1929,28 @@ elif st.session_state.phase == "RESULTS":
         height=0,
     )
 
-    # ── Guard: full_analysis_data missing (page refresh / pipeline crash) ───────
+    # ── Guard 1: full_analysis_data missing (page refresh / pipeline crash) ─────
     if "full_analysis_data" not in st.session_state:
         with _main_area.container():
             st.error("Data ontbreekt — start een nieuwe analyse.", icon="❌")
             if st.button("← Terug naar Pre-Flight Matcher", type="primary", use_container_width=True):
                 st.session_state.phase = "MATCHER"
+                st.rerun()
+        st.stop()
+
+    # ── Guard 2: full_analysis_data must be a dict (never a string / other type) ─
+    if not isinstance(st.session_state["full_analysis_data"], dict):
+        _bad_type = type(st.session_state["full_analysis_data"]).__name__
+        with _main_area.container():
+            st.error(
+                f"Systeemfout: analysisdata is corrupt (verwacht dict, kreeg {_bad_type}). "
+                "Start een nieuwe analyse.",
+                icon="❌",
+            )
+            if st.button("← Opnieuw starten", type="primary", use_container_width=True):
+                for _k in ("full_analysis_data", "results"):
+                    st.session_state.pop(_k, None)
+                st.session_state.phase = "UPLOAD"
                 st.rerun()
         st.stop()
 
@@ -2351,52 +2360,6 @@ elif st.session_state.phase == "RESULTS":
                     # ── Art Direction (collapsible) ─────────────────────────────
                     with st.expander("🎨 Art Direction Briefing"):
                         st.markdown(visual)
-
-                    # ── AI-SEO & Strategy Boost ─────────────────────────────────
-                    seo_boost = concept.get("seo_boost") or {}
-                    if seo_boost:
-                        _kws       = seo_boost.get("keywords") or []
-                        _meta_desc = seo_boost.get("meta_description", "")
-                        _psy_trig  = seo_boost.get("psychological_trigger", "")
-                        _cw_angle  = seo_boost.get("copywriting_angle", "")
-
-                        _kw_tags = "".join(
-                            f"<span style='background:#edfaf3;border:1px solid #33B784;"
-                            f"border-radius:20px;padding:3px 10px;margin:3px 4px 3px 0;"
-                            f"font-size:0.75rem;font-weight:600;color:#00573C;"
-                            f"display:inline-block'>#{kw.strip()}</span>"
-                            for kw in _kws if kw.strip()
-                        )
-                        _badge_psy = (
-                            f"<span style='background:#e8f4fd;color:#1a6ca8;border-radius:12px;"
-                            f"padding:3px 10px;font-size:0.73rem;font-weight:700;"
-                            f"margin-right:6px;display:inline-block'>🧠 {_psy_trig}</span>"
-                            if _psy_trig else ""
-                        )
-                        _badge_ang = (
-                            f"<span style='background:#fff8e1;color:#b7791f;border-radius:12px;"
-                            f"padding:3px 10px;font-size:0.73rem;font-weight:700;"
-                            f"display:inline-block'>📐 {_cw_angle}</span>"
-                            if _cw_angle else ""
-                        )
-                        _meta_html = (
-                            f"<div style='font-size:0.82rem;color:#444;line-height:1.5;"
-                            f"margin:6px 0 8px 0;font-style:italic'>\"{_meta_desc}\"</div>"
-                            if _meta_desc else ""
-                        )
-                        st.markdown(
-                            f"<div style='background:linear-gradient(135deg,#f0fff8 0%,#eaf4ff 100%);"
-                            f"border:1px solid #33B784;border-radius:10px;padding:12px 16px;"
-                            f"margin:10px 0 8px 0'>"
-                            f"<div style='font-size:0.68rem;font-weight:800;color:#00573C;"
-                            f"letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px'>"
-                            f"🚀 AI-SEO &amp; Strategy Boost</div>"
-                            f"<div style='margin-bottom:6px'>{_kw_tags}</div>"
-                            f"{_meta_html}"
-                            f"<div>{_badge_psy}{_badge_ang}</div>"
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
 
                     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
