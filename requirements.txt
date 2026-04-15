@@ -4,3 +4,4 @@ fpdf2
 openai
 pillow
 python-dotenv
+tavily-python

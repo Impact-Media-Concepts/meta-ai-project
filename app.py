@@ -13,6 +13,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from fpdf import FPDF
 
+try:
+    from tavily import TavilyClient as _TavilyClient
+    _TAVILY_AVAILABLE = True
+except ImportError:
+    _TAVILY_AVAILABLE = False
+
 from main import (
     find_column,
     classify_ads,
@@ -374,7 +380,7 @@ with st.sidebar:
         if st.button("↩️ Nieuwe analyse starten", use_container_width=True):
             for _k in ("full_analysis_data", "results", "_csv_bytes", "_csv_name", "_imgs",
                        "final_matches", "_row_idx_to_name",
-                       "_brand_name", "_brand_product", "_brand_focus"):
+                       "_brand_name", "_brand_product", "_brand_focus", "_tavily_context"):
                 st.session_state.pop(_k, None)
             for _k in [k for k in st.session_state if k.startswith("match_")]:
                 del st.session_state[_k]
@@ -389,11 +395,17 @@ with st.sidebar:
             type="password",
             help="Jouw sleutel wordt niet opgeslagen buiten deze sessie.",
         )
-        st.caption("Sleutel is alleen actief tijdens deze sessie.")
+        tavily_key = st.text_input(
+            "Tavily API-sleutel (optioneel)",
+            value=os.getenv("TAVILY_API_KEY", ""),
+            type="password",
+            help="Geef toegang tot realtime marktonderzoek. Zonder sleutel werkt de tool zonder webzoekopdrachten.",
+        )
+        st.caption("Sleutels zijn alleen actief tijdens deze sessie.")
         st.caption(
-            "☁️ **Cloud-deployment:** stel de sleutel in als omgevingsvariabele via het "
+            "☁️ **Cloud-deployment:** stel de sleutels in als omgevingsvariabelen via het "
             "Streamlit Cloud dashboard (App settings → Secrets) of het Vercel dashboard "
-            "(Settings → Environment Variables) onder de naam `OPENAI_API_KEY`."
+            "(Settings → Environment Variables) onder de namen `OPENAI_API_KEY` en `TAVILY_API_KEY`."
         )
 
 # ---------------------------------------------------------------------------
@@ -643,6 +655,7 @@ def generate_concepts(
     brand_name: str = "",
     brand_product: str = "",
     brand_focus: str = "",
+    market_research_context: str = "",
 ) -> List[Dict]:
     """
     Returns a list of concept dicts with keys:
@@ -682,10 +695,16 @@ def generate_concepts(
         else "Geen afbeeldingen geüpload."
     )
 
+    _research_block = (
+        market_research_context + "\n"
+        if market_research_context else ""
+    )
+
     system_msg = (
         f"Je bent een senior copywriter en creatief directeur {_brand_role}. "
         + "Je schrijft Instagram-waardige advertentieteksten: pakkend, menselijk, direct.\n"
         + _brand_guard
+        + _research_block
         + (
             # ── Skill library: marketing-psychology ──────────────────────────
             "PSYCHOLOGISCHE PRINCIPES (verwerk stilzwijgend in elke tekst):\n"
@@ -907,8 +926,9 @@ def _generate_concepts_cached(
     brand_name: str = "",
     brand_product: str = "",
     brand_focus: str = "",
+    market_research_context: str = "",
 ) -> list:
-    """GPT-4o concepts call — cached 1 h by (report, filenames, brand context) hash."""
+    """GPT-4o concepts call — cached 1 h by (report, filenames, brand context, research) hash."""
     return generate_concepts(
         OpenAI(api_key=api_key),
         analysis_report,
@@ -916,7 +936,64 @@ def _generate_concepts_cached(
         brand_name=brand_name,
         brand_product=brand_product,
         brand_focus=brand_focus,
+        market_research_context=market_research_context,
     )
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _run_tavily_research_cached(
+    brand_name: str,
+    brand_product: str,
+    brand_focus: str,
+    tavily_key: str,
+) -> str:
+    """
+    Run 3 targeted Tavily searches and return a formatted context block.
+    Cached 1 h by (brand_name, brand_product, brand_focus, tavily_key).
+    Returns empty string when key is missing, Tavily not installed, or all searches fail.
+    """
+    if not tavily_key or not _TAVILY_AVAILABLE:
+        return ""
+    try:
+        client  = _TavilyClient(api_key=tavily_key)
+        year    = datetime.now().year
+        label   = brand_name    or brand_product or "het merk"
+        product = brand_product or brand_name    or "dit product"
+        focus   = brand_focus   or product
+
+        queries = [
+            f"{year} marketing trends {focus}",
+            f"competitor advertising {product} social media ads Netherlands",
+            f"consumer sentiment {product} {focus} {year}",
+        ]
+        sections: list[str] = []
+        for q in queries:
+            try:
+                resp = client.search(q, max_results=3)
+                hits = (resp.get("results") or [])[:3]
+                if not hits:
+                    continue
+                block = f"**Zoekquery:** {q}\n"
+                for hit in hits:
+                    title   = (hit.get("title")   or "").strip()
+                    content = (hit.get("content") or "").strip()[:280]
+                    url     = (hit.get("url")     or "").strip()
+                    block  += f"• {title}: {content}… ({url})\n"
+                sections.append(block)
+            except Exception:
+                continue
+
+        if not sections:
+            return ""
+
+        return (
+            "REALTIME MARKTONDERZOEK — verwerk deze externe inzichten subtiel in de briefings:\n\n"
+            + "\n\n".join(sections)
+            + "\n\nGebruik bovenstaande trends en sentimenten als inspiratie. "
+            "Verwerk ze organisch — niet letterlijk citeren, wel de geest meenemen.\n"
+        )
+    except Exception:
+        return ""
 
 
 def _strip_markdown(text: str):
@@ -1937,7 +2014,21 @@ elif st.session_state.phase == "LANCERING":
         full_report = "\n".join(report_lines)
         results["full_report"] = full_report
 
-        # Stap 4: Master Prompts engineeren — cached per (report × filenames)
+        # Stap 3.5: Tavily realtime marktonderzoek (alleen als key aanwezig)
+        tavily_context = ""
+        if tavily_key and _TAVILY_AVAILABLE:
+            _prog_bar.progress(73, text="🔍 Marktonderzoek uitvoeren via Tavily...")
+            try:
+                tavily_context = _run_tavily_research_cached(
+                    st.session_state.get("_brand_name", ""),
+                    st.session_state.get("_brand_product", ""),
+                    st.session_state.get("_brand_focus", ""),
+                    tavily_key,
+                )
+            except Exception:
+                tavily_context = ""
+
+        # Stap 4: Master Prompts engineeren — cached per (report × filenames × research)
         concepts: List[Dict] = []
         img_filenames = [a["filename"] for a in analysed] if analysed else []
         _prog_bar.progress(78, text="✍️ Master Prompts engineeren...")
@@ -1949,6 +2040,7 @@ elif st.session_state.phase == "LANCERING":
                 brand_name=st.session_state.get("_brand_name", ""),
                 brand_product=st.session_state.get("_brand_product", ""),
                 brand_focus=st.session_state.get("_brand_focus", ""),
+                market_research_context=tavily_context,
             )
         except Exception:
             pass  # surfaced as warning in Phase 3
@@ -1996,6 +2088,8 @@ elif st.session_state.phase == "LANCERING":
             results["pdf_bytes"] = b""
 
         _prog_bar.progress(100, text="🌕 Geland op de maan! Dashboard laden...")
+        # Persist Tavily context so the manual-override regeneration can reuse it.
+        st.session_state["_tavily_context"] = tavily_context
         # Save under canonical key used by the entire Results dashboard.
         # "results" is kept as an alias for backward-compat with sidebar guards.
         st.session_state["full_analysis_data"] = results
@@ -2632,6 +2726,7 @@ elif st.session_state.phase == "RESULTS":
                             brand_name=st.session_state.get("_brand_name", ""),
                             brand_product=st.session_state.get("_brand_product", ""),
                             brand_focus=st.session_state.get("_brand_focus", ""),
+                            market_research_context=st.session_state.get("_tavily_context", ""),
                         )
                         r["analysed"]    = analysed
                         r["concepts"]    = _new_concepts
