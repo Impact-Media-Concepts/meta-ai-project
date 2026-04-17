@@ -6,6 +6,8 @@ from io import BytesIO
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 
+import pytz
+
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -25,6 +27,7 @@ from main import (
     clean_dutch_number,
     AD_NAME_COLUMNS,
     CAMPAIGN_COLUMNS,
+    CTR_COLUMNS,
     TONE_INSTRUCTION,
 )
 
@@ -656,6 +659,7 @@ def generate_concepts(
     brand_product: str = "",
     brand_focus: str = "",
     market_research_context: str = "",
+    negative_constraints: str = "",
 ) -> List[Dict]:
     """
     Returns a list of concept dicts with keys:
@@ -725,6 +729,13 @@ def generate_concepts(
             "• Specificaties die AI-zoekmachines kunnen extraheren: materiaal, gelegenheid, doelgroep.\n"
         )
         + TONE_INSTRUCTION
+        + (
+            f"\n\nNEGATIEVE BEPERKINGEN — STRIKT VERBODEN IN ALLE OUTPUT:\n"
+            f"{negative_constraints}\n"
+            f"Schrijf NOOIT iets dat ook maar lijkt op bovenstaande — niet letterlijk, "
+            f"niet impliciet, niet als variant."
+            if negative_constraints else ""
+        )
     )
     _brand_prompt_intro = (
         f"MERK: {_brand_label} | PRODUCT: {_brand_prod} | CAMPAGNEFOCUS: {_brand_foc}\n\n"
@@ -884,10 +895,16 @@ def _build_creatives_context(
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def _compare_creatives_cached(context: str, api_key: str) -> str:
+def _compare_creatives_cached(context: str, api_key: str, negative_constraints: str = "") -> str:
     """GPT-4o strategy call — cached 1 h by analysis context hash."""
     _c = OpenAI(api_key=api_key)
-    system_msg = f"Je bent een senior Meta Ads creatief strateeg. {TONE_INSTRUCTION}"
+    _neg_block = (
+        f"\n\nNEGATIEVE BEPERKINGEN — STRIKT VERBODEN IN ALLE OUTPUT:\n"
+        f"{negative_constraints}\n"
+        f"Schrijf NOOIT iets dat ook maar lijkt op bovenstaande."
+        if negative_constraints else ""
+    )
+    system_msg = f"Je bent een senior Meta Ads creatief strateeg. {TONE_INSTRUCTION}{_neg_block}"
     prompt = (
         "Hieronder staan visuele beschrijvingen van advertenties uit dezelfde campagne, "
         "gegroepeerd per prestatieniveau.\n\n"
@@ -927,6 +944,7 @@ def _generate_concepts_cached(
     brand_product: str = "",
     brand_focus: str = "",
     market_research_context: str = "",
+    negative_constraints: str = "",
 ) -> list:
     """GPT-4o concepts call — cached 1 h by (report, filenames, brand context, research) hash."""
     return generate_concepts(
@@ -937,6 +955,7 @@ def _generate_concepts_cached(
         brand_product=brand_product,
         brand_focus=brand_focus,
         market_research_context=market_research_context,
+        negative_constraints=negative_constraints,
     )
 
 
@@ -1089,7 +1108,8 @@ def generate_pdf(
     pdf.set_x(_PDF_MARGIN)
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(80, 80, 80)
-    pdf.cell(pdf.epw, 7, safe_pdf_text(f"Gegenereerd op: {datetime.now().strftime('%d-%m-%Y om %H:%M')}"), ln=True)
+    _ams_now = datetime.now(pytz.timezone("Europe/Amsterdam"))
+    pdf.cell(pdf.epw, 7, safe_pdf_text(f"Gegenereerd op: {_ams_now.strftime('%d-%m-%Y om %H:%M')} (Amsterdam)"), ln=True)
     pdf.set_x(_PDF_MARGIN)
     pdf.cell(pdf.epw, 7, safe_pdf_text(f"Gebruikte metric: {metric_used}"), ln=True)
     pdf.ln(6)
@@ -1516,6 +1536,34 @@ if st.session_state.phase == "UPLOAD":
                 help="Geef aan welk thema, seizoen of aanbod centraal staat in deze campagne.",
             )
 
+        _KPI_OPTIONS = [
+            "Aankopen/Reserveringen (ROAS)",
+            "Klikken (CTR)",
+            "Kosten per resultaat (CPA)",
+        ]
+        _KPI_CODE_MAP = {
+            "Aankopen/Reserveringen (ROAS)": "ROAS",
+            "Klikken (CTR)": "CTR",
+            "Kosten per resultaat (CPA)": "CPA",
+        }
+        kpi_col, neg_col = st.columns([1, 2])
+        with kpi_col:
+            _saved_kpi_label = st.session_state.get("_kpi_preference_label", _KPI_OPTIONS[0])
+            _kpi_idx = _KPI_OPTIONS.index(_saved_kpi_label) if _saved_kpi_label in _KPI_OPTIONS else 0
+            kpi_preference_label = st.selectbox(
+                "Belangrijkste KPI voor analyse",
+                options=_KPI_OPTIONS,
+                index=_kpi_idx,
+                help="Kies welke KPI het zwaarst weegt bij de High Performer classificatie.",
+            )
+        with neg_col:
+            negative_constraints = st.text_input(
+                "Wat mag de AI absoluut NIET zeggen? (optioneel)",
+                value=st.session_state.get("_negative_constraints", ""),
+                placeholder="bijv. Geen nep-kortingen, geen 'exclusief aanbod', geen prijsclaims",
+                help="Instructies worden als harde beperking in de AI-prompt verwerkt.",
+            )
+
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
         st.divider()
 
@@ -1594,6 +1642,9 @@ if st.session_state.phase == "UPLOAD":
             st.session_state["_brand_name"]   = brand_name.strip()
             st.session_state["_brand_product"] = brand_product.strip()
             st.session_state["_brand_focus"]  = brand_focus.strip()
+            st.session_state["_kpi_preference_label"] = kpi_preference_label
+            st.session_state["_kpi_preference"] = _KPI_CODE_MAP[kpi_preference_label]
+            st.session_state["_negative_constraints"] = negative_constraints.strip()
             st.session_state["_imgs"] = []
             for _img in (uploaded_images or []):
                 _img.seek(0)
@@ -1879,7 +1930,7 @@ elif st.session_state.phase == "LANCERING":
         # Stap 1: CSV classificeren
         _prog_bar.progress(6, text="📊 Campagne CSV analyseren...")
         df = load_csv_from_upload(_NamedBytesIO(csv_bytes, csv_name))
-        df, metric_used = classify_ads(df)
+        df, metric_used = classify_ads(df, kpi_preference=st.session_state.get("_kpi_preference", "ROAS"))
         results["df"] = df
         results["metric_used"] = metric_used
 
@@ -1998,7 +2049,10 @@ elif st.session_state.phase == "LANCERING":
             _prog_bar.progress(65, text="🧠 Winnende patronen identificeren...")
             try:
                 context = _build_creatives_context(high, under + avg, no_dat)
-                analysis_text = _compare_creatives_cached(context, api_key)
+                analysis_text = _compare_creatives_cached(
+                    context, api_key,
+                    negative_constraints=st.session_state.get("_negative_constraints", ""),
+                )
             except Exception as e:
                 analysis_text = f"_(Kon vergelijking niet genereren: {e})_"
         results["analysis_text"] = analysis_text
@@ -2041,6 +2095,7 @@ elif st.session_state.phase == "LANCERING":
                 brand_product=st.session_state.get("_brand_product", ""),
                 brand_focus=st.session_state.get("_brand_focus", ""),
                 market_research_context=tavily_context,
+                negative_constraints=st.session_state.get("_negative_constraints", ""),
             )
         except Exception:
             pass  # surfaced as warning in Phase 3
@@ -2048,7 +2103,7 @@ elif st.session_state.phase == "LANCERING":
 
         concepts_md_lines = [
             "# Creatieve Briefings — Nieuwe Advertentieconcepten",
-            f"_Gegenereerd: {datetime.now().strftime('%Y-%m-%d %H:%M')}_",
+            f"_Gegenereerd: {datetime.now(pytz.timezone('Europe/Amsterdam')).strftime('%Y-%m-%d %H:%M')} (Amsterdam)_",
             "", "> Gebaseerd op de winnende patronen uit de campagneanalyse.", "",
         ]
         for c in concepts:
@@ -2253,6 +2308,7 @@ elif st.session_state.phase == "RESULTS":
 
         spend_col     = find_column(df, SPEND_COLUMNS)
         roas_col_kpi  = find_column(df, ROAS_COLUMNS_KPI)
+        ctr_col_kpi   = find_column(df, CTR_COLUMNS)
         ad_col_kpi    = find_column(df, AD_NAME_COLUMNS)
 
         def _kpi_card(col, title: str, value: str) -> None:
@@ -2296,25 +2352,31 @@ elif st.session_state.phase == "RESULTS":
                 avg_roas_str = fmt_nl(_nonzero.mean()) + "x"
         _kpi_card(k2, "Gemiddelde ROAS", avg_roas_str)
 
-        # Beste Advertentie — highest ROAS among High Performer ads with actual spend
-        # Guard: idxmax() raises ValueError when the series is all-NA → use dropna() first
+        # Beste Advertentie — highest ROAS among High Performer ads; fallback to CTR when ROAS=0
         best_ad_str = "—"
-        if ad_col_kpi and roas_col_kpi:
+        if ad_col_kpi:
             hp = df[df["performance_category"] == "High Performer"].copy()
             if not hp.empty:
-                hp_roas = _parse_num_col(hp[roas_col_kpi])
-                if spend_col:
-                    hp_spend = _parse_num_col(hp[spend_col])
-                    # NaN out rows with zero spend so they can't win idxmax
-                    hp_roas = hp_roas.where(hp_spend > 0)
-                # Only consider rows with a valid positive ROAS
-                _valid = hp_roas.dropna()
-                _valid = _valid[_valid > 0]
-                if not _valid.empty:
-                    best_idx = _valid.idxmax()          # safe: guaranteed ≥1 value
-                    name_val = str(hp.loc[best_idx, ad_col_kpi])
-                else:
-                    # Fallback: first HP ad when ROAS data is absent or all zero
+                name_val = None
+                # Try ROAS first
+                if roas_col_kpi:
+                    hp_roas = _parse_num_col(hp[roas_col_kpi])
+                    if spend_col:
+                        hp_spend = _parse_num_col(hp[spend_col])
+                        hp_roas = hp_roas.where(hp_spend > 0)
+                    _valid = hp_roas.dropna()
+                    _valid = _valid[_valid > 0]
+                    if not _valid.empty:
+                        name_val = str(hp.loc[_valid.idxmax(), ad_col_kpi])
+                # Fallback to CTR when ROAS is absent or all zero
+                if name_val is None and ctr_col_kpi:
+                    hp_ctr = _parse_num_col(hp[ctr_col_kpi])
+                    _valid_ctr = hp_ctr.dropna()
+                    _valid_ctr = _valid_ctr[_valid_ctr > 0]
+                    if not _valid_ctr.empty:
+                        name_val = str(hp.loc[_valid_ctr.idxmax(), ad_col_kpi])
+                # Last resort: first HP ad
+                if name_val is None:
                     name_val = str(hp.iloc[0][ad_col_kpi])
                 best_ad_str = name_val[:28] + "…" if len(name_val) > 28 else name_val
         _kpi_card(k3, "Beste Advertentie", best_ad_str)
@@ -2727,6 +2789,7 @@ elif st.session_state.phase == "RESULTS":
                             brand_product=st.session_state.get("_brand_product", ""),
                             brand_focus=st.session_state.get("_brand_focus", ""),
                             market_research_context=st.session_state.get("_tavily_context", ""),
+                            negative_constraints=st.session_state.get("_negative_constraints", ""),
                         )
                         r["analysed"]    = analysed
                         r["concepts"]    = _new_concepts

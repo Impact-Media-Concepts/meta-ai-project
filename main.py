@@ -192,15 +192,14 @@ def _dynamic_thresholds(series: pd.Series, multiplier_hi: float = 1.2,
     return fallback_hi, fallback_lo, None
 
 
-def classify_ads(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
+def classify_ads(df: pd.DataFrame, kpi_preference: str = "ROAS") -> Tuple[pd.DataFrame, str]:
     """
     Add a 'performance_category' column to df using dynamic, data-relative thresholds.
 
-    Classification priority per row:
-      1. ROAS  — dynamic thresholds: avg*1.2 (High) / avg*0.8 (Average/Under)
-      2. CTR   — fallback when ROAS is missing/zero for that row
-      3. CPC   — fallback when both ROAS and CTR are missing/zero (lower = better)
-      4. 'No Data' — all three metrics absent
+    kpi_preference controls which metric is weighted most heavily:
+      'ROAS' — ROAS → CTR → CPC  (default)
+      'CTR'  — CTR  → ROAS → CPC
+      'CPA'  — CPC  → ROAS → CTR  (lower CPC = better)
 
     All numeric columns are cleaned from Dutch locale format (e.g. '3.597,12' → 3597.12)
     so downstream KPI cards get plain Python floats without further parsing.
@@ -257,30 +256,60 @@ def classify_ads(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
         cpc_lo_thresh = _cpc_hi   # below this  → High Performer
         cpc_hi_thresh = _cpc_lo   # above this  → Underperformer
 
-    # ── Step 3: Row-level classification with fallback chain ─────────────────
-    def _classify_row(row) -> str:
-        # Primary: ROAS
+    # ── Step 3: Row-level classification with KPI-preference fallback chain ──
+    def _try_roas(row):
         if roas_col and roas_hi is not None:
             v = row[roas_col]
             if pd.notna(v) and v > 0:
                 return classify_by_roas(v, roas_hi, roas_lo)
+        return None
 
-        # Secondary: CTR (when ROAS is absent/zero for this row)
+    def _try_ctr(row):
         if ctr_col and ctr_hi is not None:
             v = row[ctr_col]
             if pd.notna(v) and v > 0:
                 return classify_by_ctr(v, ctr_hi, ctr_lo)
+        return None
 
-        # Tertiary: CPC (lower is better; when ROAS and CTR both absent)
+    def _try_cpc(row):
         if cpc_col and cpc_lo_thresh is not None:
             v = row[cpc_col]
             if pd.notna(v) and v > 0:
                 return classify_by_cpc(v, cpc_lo_thresh, cpc_hi_thresh)
+        return None
 
+    if kpi_preference == "CTR":
+        _chain = [_try_ctr, _try_roas, _try_cpc]
+    elif kpi_preference == "CPA":
+        _chain = [_try_cpc, _try_roas, _try_ctr]
+    else:
+        _chain = [_try_roas, _try_ctr, _try_cpc]
+
+    def _classify_row(row) -> str:
+        for fn in _chain:
+            result = fn(row)
+            if result is not None:
+                return result
         return "No Data"
 
-    if roas_col:
-        df["performance_category"] = df.apply(_classify_row, axis=1)
+    df["performance_category"] = df.apply(_classify_row, axis=1)
+
+    # Build metric_used string reflecting the chosen KPI preference
+    if kpi_preference == "CTR" and ctr_col:
+        _, _, ctr_avg = _dynamic_thresholds(df[ctr_col], fallback_hi=2.0, fallback_lo=1.0)
+        if ctr_hi is not None and ctr_avg is not None:
+            thresh_str = (
+                f"gem {ctr_avg:.2f}% → Hoog ≥ {ctr_hi:.2f}%, "
+                f"Gem ≥ {ctr_lo:.2f}%"
+            )
+        elif ctr_hi is not None:
+            thresh_str = f"Hoog ≥ {ctr_hi}%, Gem ≥ {ctr_lo}%"
+        else:
+            thresh_str = "dynamisch"
+        metric_used = f"CTR — KPI-voorkeur (dynamisch — {thresh_str})"
+    elif kpi_preference == "CPA" and cpc_col:
+        metric_used = "CPC/CPA — KPI-voorkeur (dynamisch, lager = beter)"
+    elif roas_col:
         if roas_avg is not None:
             thresh_str = (
                 f"gem {roas_avg:.2f}x → Hoog ≥ {roas_hi:.2f}, "
@@ -289,13 +318,8 @@ def classify_ads(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
         else:
             thresh_str = f"Hoog ≥ {roas_hi}, Gem ≥ {roas_lo}"
         metric_used = f"ROAS (dynamisch — {thresh_str})"
-
     else:
         # Pure CTR mode (no ROAS column in this CSV at all)
-        df["performance_category"] = df[ctr_col].apply(
-            lambda v: classify_by_ctr(v, ctr_hi, ctr_lo) if pd.notna(v) and v > 0
-            else "No Data"
-        )
         _, _, ctr_avg = _dynamic_thresholds(df[ctr_col], fallback_hi=2.0, fallback_lo=1.0)
         if ctr_avg is not None:
             thresh_str = (
