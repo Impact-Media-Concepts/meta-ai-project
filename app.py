@@ -421,6 +421,7 @@ if "phase" not in st.session_state:
 
 # Guard 1: pipeline finished but phase wasn't advanced (mid-rerun edge case)
 if st.session_state.phase == "LANCERING" and "full_analysis_data" in st.session_state:
+    st.session_state["_analysis_starting"] = False
     st.session_state.phase = "RESULTS"
 
 # Guard 2: user refreshed during LANCERING — session memory is gone
@@ -706,6 +707,10 @@ def generate_concepts(
         f"Als het merk sieraden verkoopt → schrijf UITSLUITEND over sieraden. "
         f"Nooit afwijken naar dieren, andere productcategorieën of niet-gerelateerde thema's. "
         f"Campagnefocus '{_brand_foc}' is leidend voor elk concept.\n"
+        f"GEBRUIK DE MERKCONTEXT ALS ACHTERGRONDKENNIS — herhaal de voorbeeldmerken, "
+        f"voorbeeldzinnen of exacte termen uit deze context NIET letterlijk in elk concept. "
+        f"Varieer de invalshoek en focus per concept; schrijf elk concept vanuit een andere "
+        f"emotionele of functionele insteek.\n"
     ) if _has_brand else ""
     _brand_role = (
         f"die werkt voor het merk {_brand_label} ({_brand_prod})"
@@ -921,7 +926,7 @@ def _build_creatives_context(
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def _compare_creatives_cached(context: str, api_key: str, guardrails: str = "") -> str:
+def _compare_creatives_cached(context: str, api_key: str, guardrails: str = "", brand_focus: str = "") -> str:
     """GPT-4o strategy call — cached 1 h by analysis context hash."""
     _c = OpenAI(api_key=api_key)
     _guardrails_block = (
@@ -930,7 +935,11 @@ def _compare_creatives_cached(context: str, api_key: str, guardrails: str = "") 
         f"Houd je hier STRIKT aan in alle output."
         if guardrails else ""
     )
-    system_msg = f"Je bent een senior Meta Ads creatief strateeg. {TONE_INSTRUCTION}{_guardrails_block}"
+    _brand_focus_block = (
+        f"\n\nCampagnefocus voor Lange Termijn Strategie: {brand_focus}"
+        if brand_focus else ""
+    )
+    system_msg = f"Je bent een senior Meta Ads creatief strateeg. {TONE_INSTRUCTION}{_guardrails_block}{_brand_focus_block}"
     prompt = (
         "Hieronder staan visuele beschrijvingen van advertenties uit dezelfde campagne, "
         "gegroepeerd per prestatieniveau.\n\n"
@@ -948,7 +957,15 @@ def _compare_creatives_cached(context: str, api_key: str, guardrails: str = "") 
         "**Aanbeveling N:** [actie]\n"
         "**Prioriteit:** Hoog | Middel | Laag\n"
         "**Verwachte Impact:** [waarom dit werkt]\n\n"
-        "Vermijd generiek advies."
+        "Vermijd generiek advies.\n\n"
+        "## 5. Lange Termijn Strategie\n"
+        "Geef een strategisch advies voor de komende 3–6 maanden. "
+        "Analyseer of de campagnedata seizoenspatronen suggereert (piek vs. dal). "
+        "Als er een seizoenspiek zichtbaar is: schrijf een 'Seasonal Peak Management'-strategie "
+        "(maximaliseer bereik en budget in de piekperiode). "
+        "Als de data een stabiel of dalend patroon toont: schrijf een 'Brand Equity'-strategie "
+        "(investeer nu in merkbekendheid om de volgende piek sterker in te gaan). "
+        "Wees concreet: benoem creative-rotatieschema, budgetverdeling en testmethode."
     )
     response = _c.chat.completions.create(
         model="gpt-4o",
@@ -956,7 +973,7 @@ def _compare_creatives_cached(context: str, api_key: str, guardrails: str = "") 
             {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=1400,
+        max_tokens=2000,
     )
     return response.choices[0].message.content
 
@@ -1106,7 +1123,6 @@ def generate_pdf(
     concepts: List[Dict],
 ) -> bytes:
     pdf = FPDF()
-    pdf.core_fonts_encoding = "utf-8"
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.set_margins(_PDF_MARGIN, _PDF_MARGIN, _PDF_MARGIN)
 
@@ -1629,12 +1645,18 @@ if st.session_state.phase == "UPLOAD":
                 st.success(f"✓ {len(uploaded_images)} afbeelding(en) geladen")
 
         st.divider()
+        _starting = st.session_state.get("_analysis_starting", False)
         start_btn = st.button(
-            "🚀 Analyse Starten",
-            disabled=(csv_file is None),
+            "⏳ Bezig met analyseren..." if _starting else "🚀 Analyse Starten",
+            disabled=(csv_file is None or _starting),
             type="primary",
             use_container_width=True,
         )
+        if _starting:
+            st.components.v1.html(
+                "<script>window.parent.document.querySelector('.main').scrollTo({top:0,behavior:'smooth'});</script>",
+                height=0,
+            )
 
         if not csv_file:
             st.markdown(
@@ -1673,6 +1695,7 @@ if st.session_state.phase == "UPLOAD":
             )
 
         if start_btn and csv_file:
+            st.session_state["_analysis_starting"] = True
             csv_file.seek(0)
             st.session_state["_csv_bytes"]    = csv_file.read()
             st.session_state["_csv_name"]     = csv_file.name
@@ -2090,6 +2113,7 @@ elif st.session_state.phase == "LANCERING":
                 analysis_text = _compare_creatives_cached(
                     context, api_key,
                     guardrails=st.session_state.get("_guardrails", ""),
+                    brand_focus=st.session_state.get("_brand_focus", ""),
                 )
             except Exception as e:
                 analysis_text = f"_(Kon vergelijking niet genereren: {e})_"
@@ -2187,6 +2211,7 @@ elif st.session_state.phase == "LANCERING":
         # "results" is kept as an alias for backward-compat with sidebar guards.
         st.session_state["full_analysis_data"] = results
         st.session_state["results"] = results
+        st.session_state["_analysis_starting"] = False
         st.session_state.phase = "RESULTS"
         st.rerun()
 
