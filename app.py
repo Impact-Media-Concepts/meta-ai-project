@@ -23,6 +23,8 @@ except ImportError:
 
 from main import (
     find_column,
+    find_column_by_keywords,
+    safe_series,
     classify_ads,
     clean_dutch_number,
     AD_NAME_COLUMNS,
@@ -32,6 +34,8 @@ from main import (
     ROAS_COLUMNS,
     RESULTS_COLUMNS,
     LPV_COST_COLUMNS,
+    SPEND_COLUMNS,
+    REVENUE_COLUMNS,
     TONE_INSTRUCTION,
 )
 
@@ -58,16 +62,9 @@ colours_map = {
     "No Data":        "background-color: #e2e3e5; color: #383d41",
 }
 
-SPEND_COLUMNS = [
-    "Besteed bedrag (EUR)", "Amount spent (EUR)", "Besteed bedrag",
-    "Amount spent", "Kosten", "Spend",
-]
-
-ROAS_COLUMNS_KPI = [
-    "ROAS (rendement op advertentie-uitgaven) voor aankoop",
-    "Purchase ROAS (return on ad spend)", "ROAS",
-    "Rendement op advertentie-uitgaven",
-]
+# SPEND_COLUMNS and ROAS_COLUMNS are imported from main.py above.
+# Keep ROAS_COLUMNS_KPI as an alias so the dashboard code below still works.
+ROAS_COLUMNS_KPI = ROAS_COLUMNS
 
 MATRIX_GROUPS = {
     "Hoog":   {"label": "Directe Actie",  "bg": "#00573C", "color": "#ffffff"},
@@ -482,18 +479,27 @@ def load_csv_from_upload(file) -> pd.DataFrame:
     file.seek(0)
     raw = file.read()
 
-    # Columns that carry numeric data in Dutch locale format.
-    # Only string-typed columns (dtype == object) are cleaned here —
-    # if pandas already parsed a column as float we leave it alone.
-    _NUMERIC_COLS = [
-        "Besteed bedrag (EUR)", "Besteed bedrag", "Amount spent (EUR)", "Amount spent",
-        "Aankopen", "Purchases",
-        "ROAS (rendement op advertentie-uitgaven) voor aankoop",
-        "Purchase ROAS (return on ad spend)", "ROAS",
-        "CTR (doorklikratio voor klikken op link)", "CTR (link click-through rate)",
-        "CTR (all)", "CTR",
-        "CPC (kosten per klik op link)", "CPC (cost per link click)", "CPC (all)", "CPC",
-        "Conversiewaarde van aankopen", "Purchase conversion value",
+    # Known-numeric column families — used for pre-cleaning Dutch locale strings.
+    # All candidate lists are imported from main.py so they stay in sync.
+    _KNOWN_NUMERIC_FAMILIES = (
+        ROAS_COLUMNS + CTR_COLUMNS + CPC_COLUMNS
+        + RESULTS_COLUMNS + LPV_COST_COLUMNS
+        + SPEND_COLUMNS + REVENUE_COLUMNS
+    )
+    # Keyword groups for columns whose names vary too much for exact matching.
+    # Any object-dtype column whose name contains ALL keywords in any group
+    # is treated as numeric and Dutch-locale-cleaned.
+    _NUMERIC_KEYWORD_GROUPS = [
+        ["conversiewaarde"],          # "Conversiewaarde aankopen", "Conversiewaarde van aankopen"
+        ["purchase", "value"],        # "Purchase conversion value"
+        ["besteed", "bedrag"],        # "Besteed bedrag (USD)", regional variants
+        ["amount", "spent"],          # "Amount spent (GBP)", etc.
+        ["kosten", "resultaat"],      # "Kosten per resultaat"
+        ["cost", "result"],
+        ["kosten", "klik"],
+        ["cost", "click"],
+        ["kosten", "bestemmingspagina"],
+        ["cost", "landing"],
     ]
 
     def _read(sep, enc) -> pd.DataFrame:
@@ -501,7 +507,7 @@ def load_csv_from_upload(file) -> pd.DataFrame:
             encoding=enc,
             encoding_errors="replace",
             on_bad_lines="skip",
-            skipinitialspace=True,   # strip spaces after delimiter (e.g. ", Value")
+            skipinitialspace=True,
         )
         if sep is None:
             kwargs.update(sep=None, engine="python")
@@ -510,18 +516,15 @@ def load_csv_from_upload(file) -> pd.DataFrame:
         df = pd.read_csv(BytesIO(raw), **kwargs)
 
         # Strip whitespace from every column name immediately.
-        # Meta Ads exports often pad headers: ' Advertentienaam ', ' ROAS ', etc.
         df.columns = df.columns.str.strip()
 
-        # Reject if we only got 1 column — wrong separator was chosen.
         if len(df.columns) <= 1:
             raise ValueError(
                 f"Only {len(df.columns)} column(s) parsed with sep={sep!r}/{enc} "
                 "— likely wrong separator."
             )
 
-        # Immediately clean the ad-name column so downstream code always gets
-        # a plain, non-null string (never NaN, never '  BANNER_3  ').
+        # Clean ad-name column so downstream code always gets a plain string.
         for _ad_col_name in AD_NAME_COLUMNS:
             if _ad_col_name in df.columns:
                 df[_ad_col_name] = (
@@ -530,12 +533,26 @@ def load_csv_from_upload(file) -> pd.DataFrame:
                     .astype(str)
                     .str.strip()
                 )
-                break   # only clean the first matching column
+                break
 
-        # Pre-clean numeric columns that are still raw strings.
-        for _col in _NUMERIC_COLS:
+        # Pre-clean numeric columns.
+        # Step A: exact/known family matches
+        for _col in _KNOWN_NUMERIC_FAMILIES:
             if _col in df.columns and df[_col].dtype == object:
                 df[_col] = df[_col].apply(clean_dutch_number)
+
+        # Step B: keyword-based catch for columns not in the exact lists
+        for _col in df.columns:
+            if df[_col].dtype != object:
+                continue
+            _col_lower = _col.lower()
+            for _grp in _NUMERIC_KEYWORD_GROUPS:
+                if all(kw in _col_lower for kw in _grp):
+                    try:
+                        df[_col] = df[_col].apply(clean_dutch_number)
+                    except Exception:
+                        pass
+                    break  # only clean each column once
 
         return df
 
@@ -2327,12 +2344,19 @@ elif st.session_state.phase == "RESULTS":
                 errors="coerce",
             ).fillna(0.0)
 
-        spend_col        = find_column(df, SPEND_COLUMNS)
-        roas_col_kpi     = find_column(df, ROAS_COLUMNS_KPI)
-        ctr_col_kpi      = find_column(df, CTR_COLUMNS)
-        cpc_col_kpi      = find_column(df, CPC_COLUMNS)
-        results_col_kpi  = find_column(df, RESULTS_COLUMNS)
-        lpv_col_kpi      = find_column(df, LPV_COST_COLUMNS)
+        spend_col = (find_column(df, SPEND_COLUMNS)
+                     or find_column_by_keywords(df, ["besteed", "bedrag"], ["amount", "spent"]))
+        roas_col_kpi = (find_column(df, ROAS_COLUMNS_KPI)
+                        or find_column_by_keywords(df, ["roas"], ["rendement", "advertentie"]))
+        ctr_col_kpi = (find_column(df, CTR_COLUMNS)
+                       or find_column_by_keywords(df, ["ctr"], ["doorklikratio"]))
+        cpc_col_kpi = (find_column(df, CPC_COLUMNS)
+                       or find_column_by_keywords(df, ["cpc"], ["kosten", "klik"]))
+        results_col_kpi = (find_column(df, RESULTS_COLUMNS)
+                           or find_column_by_keywords(df, ["resultaten"], ["reserveringen"]))
+        lpv_col_kpi = (find_column(df, LPV_COST_COLUMNS)
+                       or find_column_by_keywords(df, ["bestemmingspagina", "kosten"],
+                                                  ["landing", "page", "cost"]))
         ad_col_kpi       = find_column(df, AD_NAME_COLUMNS)
         _active_kpi_code = st.session_state.get("_kpi_preference", "ROAS")
 

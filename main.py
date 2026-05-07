@@ -14,22 +14,20 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- Column name mappings for common Meta Ads export formats ---
 ROAS_COLUMNS = [
-    # Dutch (NL)
     "ROAS (rendement op advertentie-uitgaven) voor aankoop",
-    # English
     "Purchase ROAS (return on ad spend)",
     "ROAS (return on ad spend)",
+    "Rendement op advertentie-uitgaven",
     "purchase_roas",
     "roas",
     "ROAS",
 ]
 
 CTR_COLUMNS = [
-    # Dutch (NL)
     "CTR (doorklikratio voor klikken op link)",
-    # English
-    "CTR (all)",
     "CTR (link click-through rate)",
+    "CTR (doorklikratio voor alle klikken)",
+    "CTR (all)",
     "Link CTR",
     "ctr_all",
     "ctr",
@@ -39,6 +37,7 @@ CTR_COLUMNS = [
 CPC_COLUMNS = [
     "CPC (kosten per klik op link)",
     "CPC (cost per link click)",
+    "CPC (kosten per alle klikken)",
     "CPC (all)",
     "Cost per link click",
     "CPC",
@@ -54,21 +53,43 @@ RESULTS_COLUMNS = [
     "Purchases",
     "Conversies",
     "Conversions",
+    "Berichtreacties",
+    "Post reactions",
 ]
 
 LPV_COST_COLUMNS = [
     "Kosten per weergave van bestemmingspagina",
-    "Cost per landing page view",
+    "Kosten per weergave bestemmingspagina",
     "Kosten per bestemmingspagina-weergave",
+    "Cost per landing page view",
     "Cost per LP view",
     "Kosten per LP-weergave",
 ]
 
 LPV_VOLUME_COLUMNS = [
     "Weergaven van bestemmingspagina",
-    "Landing page views",
     "Weergaven bestemmingspagina",
+    "Landing page views",
     "LP views",
+]
+
+# Spend / budget columns
+SPEND_COLUMNS = [
+    "Besteed bedrag (EUR)", "Amount spent (EUR)",
+    "Besteed bedrag (USD)", "Amount spent (USD)",
+    "Besteed bedrag", "Amount spent",
+    "Kosten", "Spend", "Budget gespendeerd",
+]
+
+# Revenue / purchase conversion value columns — many variants across locales
+REVENUE_COLUMNS = [
+    "Conversiewaarde van aankopen",       # NL full
+    "Conversiewaarde aankopen",            # NL short (common variant)
+    "Conversiewaarde van alle aankopen",
+    "Purchase conversion value",
+    "Conversion value of purchases",
+    "Omzet aankopen",
+    "Opbrengst", "Revenue", "Omzet",
 ]
 
 AD_NAME_COLUMNS = ["Advertentienaam", "Ad name", "ad_name", "Ad Name", "name"]
@@ -77,11 +98,51 @@ ADSET_COLUMNS = ["Naam advertentieset", "Ad set name", "adset_name", "Ad Set Nam
 
 
 def find_column(df: pd.DataFrame, candidates: list) -> Optional[str]:
-    """Return the first candidate column name that exists in the DataFrame."""
+    """
+    Robust column finder — three passes:
+    1. Exact match (fast path, original behaviour).
+    2. Case-insensitive stripped match (handles padded / cased variants).
+    3. Returns None — caller can chain with find_column_by_keywords().
+    """
+    # Pass 1: exact
     for col in candidates:
         if col in df.columns:
             return col
+    # Pass 2: case-insensitive
+    norm = {c.strip().lower(): c for c in df.columns}
+    for col in candidates:
+        hit = norm.get(col.strip().lower())
+        if hit is not None:
+            return hit
     return None
+
+
+def find_column_by_keywords(df: pd.DataFrame, *keyword_groups) -> Optional[str]:
+    """
+    Scan every column name for a keyword match.
+    Each positional argument is a list/tuple of keywords that ALL must appear
+    (case-insensitive) in the column name.  Returns the first column that
+    satisfies any group.
+
+    Example:
+        find_column_by_keywords(df,
+            ["conversiewaarde", "aankoop"],   # matches "Conversiewaarde aankopen"
+            ["purchase", "conversion"],        # matches "Purchase conversion value"
+        )
+    """
+    for col in df.columns:
+        col_lower = col.lower()
+        for group in keyword_groups:
+            if all(kw.lower() in col_lower for kw in group):
+                return col
+    return None
+
+
+def safe_series(df: pd.DataFrame, col: Optional[str]) -> "pd.Series":
+    """Return df[col] if col is not None and exists; else a zero-filled Series."""
+    if col and col in df.columns:
+        return df[col]
+    return pd.Series([0.0] * len(df), index=df.index)
 
 
 # ---------------------------------------------------------------------------
@@ -198,19 +259,6 @@ def parse_dutch_numeric(series: pd.Series) -> pd.Series:
     return series.apply(clean_dutch_number)
 
 
-# Columns that may contain spend / budget amounts (cleaned alongside ROAS/CTR)
-SPEND_COLUMNS = [
-    "Besteed bedrag (EUR)", "Amount spent (EUR)", "Besteed bedrag",
-    "Amount spent", "Kosten", "Spend",
-]
-
-# Columns that may contain purchase revenue (used for weighted ROAS)
-REVENUE_COLUMNS = [
-    "Conversiewaarde van aankopen", "Purchase conversion value",
-    "Opbrengst", "Revenue", "Omzet",
-]
-
-
 def _dynamic_thresholds(series: pd.Series, multiplier_hi: float = 1.2,
                         multiplier_lo: float = 0.8,
                         fallback_hi: float = 3.0,
@@ -243,35 +291,50 @@ def classify_ads(df: pd.DataFrame, kpi_preference: str = "ROAS") -> Tuple[pd.Dat
     Always guarantees at least one High Performer and one Underperformer via
     forced percentile split when normal classification yields only one category.
     """
-    roas_col    = find_column(df, ROAS_COLUMNS)
-    ctr_col     = find_column(df, CTR_COLUMNS)
-    cpc_col     = find_column(df, CPC_COLUMNS)
-    results_col = find_column(df, RESULTS_COLUMNS)
-    lpv_col     = find_column(df, LPV_COST_COLUMNS)
+    # ── Column detection: exact list → case-insensitive → keyword fallback ────
+    roas_col = (find_column(df, ROAS_COLUMNS)
+                or find_column_by_keywords(df, ["roas"], ["rendement", "advertentie"]))
+    ctr_col  = (find_column(df, CTR_COLUMNS)
+                or find_column_by_keywords(df, ["ctr"], ["doorklikratio"]))
+    cpc_col  = (find_column(df, CPC_COLUMNS)
+                or find_column_by_keywords(df, ["cpc"], ["kosten", "klik"]))
+    results_col = (find_column(df, RESULTS_COLUMNS)
+                   or find_column_by_keywords(df, ["resultaten"], ["reserveringen"],
+                                              ["leads"], ["conversies"]))
+    lpv_col  = (find_column(df, LPV_COST_COLUMNS)
+                or find_column_by_keywords(df, ["bestemmingspagina", "kosten"],
+                                           ["landing", "page", "view", "cost"]))
+    spend_col_raw = (find_column(df, SPEND_COLUMNS)
+                     or find_column_by_keywords(df, ["besteed", "bedrag"],
+                                                ["amount", "spent"], ["spend"]))
+    revenue_col_raw = (find_column(df, REVENUE_COLUMNS)
+                       or find_column_by_keywords(df,
+                                                  ["conversiewaarde"],
+                                                  ["purchase", "conversion", "value"],
+                                                  ["opbrengst"], ["revenue"]))
 
     # ── Step 1: Parse all numeric columns from Dutch/English locale ──────────
-    if roas_col:
-        df[roas_col] = parse_dutch_numeric(df[roas_col])
-    if ctr_col:
-        df[ctr_col] = parse_dutch_numeric(
-            df[ctr_col].astype(str).str.replace("%", "", regex=False)
-        )
-    if cpc_col:
-        df[cpc_col] = parse_dutch_numeric(df[cpc_col])
-    if results_col:
-        df[results_col] = parse_dutch_numeric(df[results_col])
-    if lpv_col:
-        df[lpv_col] = parse_dutch_numeric(df[lpv_col])
-    for _col in [find_column(df, SPEND_COLUMNS), find_column(df, REVENUE_COLUMNS)]:
+    for _col in [roas_col, cpc_col, results_col, lpv_col,
+                 spend_col_raw, revenue_col_raw]:
         if _col and _col in df.columns:
-            df[_col] = parse_dutch_numeric(df[_col])
+            try:
+                df[_col] = parse_dutch_numeric(df[_col])
+            except Exception:
+                pass  # leave column as-is; downstream fillna(0) handles it
+    if ctr_col and ctr_col in df.columns:
+        try:
+            df[ctr_col] = parse_dutch_numeric(
+                df[ctr_col].astype(str).str.replace("%", "", regex=False)
+            )
+        except Exception:
+            pass
 
     # ── Step 2: Compute dynamic thresholds ───────────────────────────────────
     _all_kpi_cols = [roas_col, ctr_col, cpc_col, results_col, lpv_col]
     if not any(_all_kpi_cols):
         raise ValueError(
             "Geen KPI-kolom gevonden in de CSV.\n"
-            f"Verwacht een van: {ROAS_COLUMNS + CTR_COLUMNS + CPC_COLUMNS + RESULTS_COLUMNS + LPV_COST_COLUMNS}\n"
+            "Verwacht een van: ROAS, CTR, CPC, Resultaten, Kosten per LP-weergave\n"
             f"Aanwezige kolommen: {list(df.columns)}"
         )
 
